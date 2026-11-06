@@ -1,0 +1,491 @@
+diff --git a/packages/executor/src/entities/FrameTxMempoolEntry.ts b/packages/executor/src/entities/FrameTxMempoolEntry.ts
+index 2ac1502..4619969 100644
+--- a/packages/executor/src/entities/FrameTxMempoolEntry.ts
++++ b/packages/executor/src/entities/FrameTxMempoolEntry.ts
+@@ -25,6 +25,8 @@ export interface FrameTxMempoolEntryOptions {
+   includer?: `0x${string}`;
+   /** ethrex's maximum cost for this tx (wei), from admission-time simulation */
+   maxCost?: bigint;
++  /** The staked payer's storage slots this tx's validation touched (see payerKeys). */
++  payerKeys?: string[];
+ }
+ 
+ /**
+@@ -60,6 +62,17 @@ export class FrameTxMempoolEntry implements IFrameTxMempoolEntry {
+   revertReason?: string;
+   includer?: `0x${string}`;
+   maxCost?: bigint;
++  /**
++   * Payer keys: the staked payer's own storage slots that this transaction's
++   * validation prefix read or wrote, sorted. For a shielded privacy pool these are
++   * the slots of the notes' nullifiers. A pending transaction holds its payer
++   * keys the way it holds its EIP-8250 nonce keys: no other pending
++   * transaction paid by the same payer may touch one (see
++   * `MempoolService.checkPayerKeyConflict`). Empty for a self-paying sender
++   * and for an unstaked payer, which the storage rules keep out of its own
++   * storage anyway.
++   */
++  payerKeys: string[];
+ 
+   constructor(tx: FrameTransaction, options: FrameTxMempoolEntryOptions = {}) {
+     this.tx = tx;
+@@ -75,6 +88,7 @@ export class FrameTxMempoolEntry implements IFrameTxMempoolEntry {
+     this.revertReason = options.revertReason;
+     this.includer = options.includer;
+     this.maxCost = options.maxCost;
++    this.payerKeys = options.payerKeys ?? [];
+ 
+     this.validateAndNormalizeTx();
+ 
+@@ -194,6 +208,20 @@ export class FrameTxMempoolEntry implements IFrameTxMempoolEntry {
+    * Same as `canReplace`, except an entry may also be replaced unconditionally
+    * once `ttl` seconds have elapsed since the existing entry was last updated.
+    */
++  /**
++   * The fee rule of `canReplace` without its same-slot requirement: at least
++   * 10% more on both maxPriorityFeePerGas and maxFeePerGas. Used when a
++   * transaction of another sender takes over a pending one's payer keys.
++   */
++  outbids(existingEntry: FrameTxMempoolEntry): boolean {
++    const { fees } = this.tx;
++    const old = existingEntry.tx.fees;
++    return (
++      fees.maxPriorityFeePerGas >= (old.maxPriorityFeePerGas * BigInt(11)) / BigInt(10) &&
++      fees.maxFeePerGas >= (old.maxFeePerGas * BigInt(11)) / BigInt(10)
++    );
++  }
++
+   canReplaceWithTTL(existingEntry: FrameTxMempoolEntry, ttl: number): boolean {
+     if (this.lastUpdatedTime - existingEntry.lastUpdatedTime > ttl * 1000) {
+       return true;
+@@ -284,6 +312,7 @@ export class FrameTxMempoolEntry implements IFrameTxMempoolEntry {
+       actualTransaction: this.actualTransaction,
+       revertReason: this.revertReason,
+       includer: this.includer,
++      payerKeys: this.payerKeys,
+     };
+   }
+ }
+diff --git a/packages/executor/src/entities/interfaces.ts b/packages/executor/src/entities/interfaces.ts
+index 860d25a..8d72379 100644
+--- a/packages/executor/src/entities/interfaces.ts
++++ b/packages/executor/src/entities/interfaces.ts
+@@ -69,6 +69,7 @@ export interface IFrameTxMempoolEntry {
+   revertReason?: string;
+   includer?: `0x${string}`;
+   maxCost?: bigint;
++  payerKeys?: string[];
+ }
+ 
+ /** Hex-encoded (DB-storable) form of a `FrameTransaction`. */
+@@ -111,6 +112,7 @@ export interface FrameTxMempoolEntrySerialized {
+   actualTransaction: string | undefined;
+   revertReason: string | undefined;
+   includer: `0x${string}` | undefined;
++  payerKeys?: string[];
+ }
+ 
+ export interface IReputationEntry {
+diff --git a/packages/executor/src/modules/eth.ts b/packages/executor/src/modules/eth.ts
+index 6a76f7c..58b6b06 100644
+--- a/packages/executor/src/modules/eth.ts
++++ b/packages/executor/src/modules/eth.ts
+@@ -203,7 +203,8 @@ export class Eth {
+         validation.roleStakes.sender,
+         validation.roleStakes.factory,
+         validation.roleStakes.payer,
+-        validation.maxCost
++        validation.maxCost,
++        validation.payerKeys
+       );
+       replacedTxHash = added?.replacedTxHash;
+     } catch (err) {
+diff --git a/packages/executor/src/services/MempoolService/service.ts b/packages/executor/src/services/MempoolService/service.ts
+index c1141cd..11b7589 100644
+--- a/packages/executor/src/services/MempoolService/service.ts
++++ b/packages/executor/src/services/MempoolService/service.ts
+@@ -232,19 +232,22 @@ export class MempoolService {
+     senderInfo?: StakeInfo,
+     factoryInfo?: StakeInfo,
+     payerInfo?: StakeInfo,
+-    maxCost?: bigint
++    maxCost?: bigint,
++    payerKeys?: string[]
+   ): Promise<{ replacedTxHash?: string }> {
+     const entry = new MempoolEntry(tx, {
+       txHash,
+       hash,
+       submittedTime: now(),
+       maxCost,
++      payerKeys,
+     });
+     let replacedTxHash: string | undefined;
+     await this.mutex.runExclusive(async () => {
+       await this.checkNonceKeyConflict(entry);
++      const outbid = await this.checkPayerKeyConflict(entry);
+       const existingEntry = await this.find(entry);
+-      await this.checkBalanceObligations(entry, existingEntry);
++      await this.checkBalanceObligations(entry, existingEntry, outbid);
+       if (existingEntry) {
+         await this.validateReplaceability(entry, existingEntry);
+         await this.db.put(this.getKey(entry), {
+@@ -305,6 +308,19 @@ export class MempoolService {
+         }
+         this.logger.debug("Mempool: Frame transaction added");
+       }
++      if (outbid) {
++        // Taken over by this entry: same payer keys, higher fee. Only one of
++        // the two could ever be included, so the old one is cancelled now
++        // rather than left to fail and count against the payer.
++        outbid.setStatus(MempoolEntryStatus.Cancelled, {
++          revertReason: `replaced by ${entry.txHash}: same payer keys of ${entry.payer}, higher fee`,
++        });
++        await this.db.put(this.getKey(outbid), outbid);
++        await this.watchForLateInclusionUnlocked(outbid);
++        this.eventBus.emit(ExecutorEvent.submittedUserOps, outbid);
++        replacedTxHash ??= outbid.txHash;
++        this.logger.debug("Mempool: Frame transaction outbid on its payer keys");
++      }
+       if (senderInfo || factoryInfo || payerInfo) {
+         // `senderInfo` alone may be undefined (Self Relay) - updateSeenStatus
+         // itself tolerates that; see its own comment.
+@@ -406,6 +422,56 @@ export class MempoolService {
+     }
+   }
+ 
++  /**
++   * Payer keys (see `FrameTxMempoolEntry.payerKeys`): each (payer, key) is
++   * held by at most one pending transaction, whoever its sender is. A new
++   * transaction that touches a key a pending one of the same payer holds is
++   * refused, unless its key set is exactly that one's and it outbids it by
++   * the replacement fee bump (10% on both fees); then that one is returned,
++   * for the caller to cancel once this one is in. A partial overlap is
++   * always refused, so one admission displaces at most one transaction.
++   *
++   * For a shielded privacy pool this is "at most one pending transaction per
++   * (pool, nullifier)": spending a note again needs its secret, so only the
++   * note's owner can take over its pending transaction, and only by paying
++   * more. Transactions spending different notes of the same pool coexist.
++   */
++  private async checkPayerKeyConflict(
++    entry: MempoolEntry
++  ): Promise<MempoolEntry | null> {
++    if (entry.payerKeys.length === 0) return null;
++    const slot = this.getKey(entry);
++    const payer = entry.payer.toLowerCase();
++    const keys = new Set(entry.payerKeys);
++    let outbid: MempoolEntry | null = null;
++    for (const pending of await this.fetchPendingUserOps()) {
++      if (
++        pending.payer.toLowerCase() !== payer ||
++        this.getKey(pending) === slot ||
++        pending.payerKeys.length === 0
++      ) {
++        continue;
++      }
++      const shared = pending.payerKeys.find((k) => keys.has(k));
++      if (shared === undefined) continue;
++      const sameSet =
++        pending.payerKeys.length === entry.payerKeys.length &&
++        pending.payerKeys.every((k) => keys.has(k));
++      if (sameSet && outbid === null && entry.outbids(pending)) {
++        outbid = pending;
++        continue;
++      }
++      throw new RpcError(
++        `payer ${entry.payer} key ${shared} is already held by pending transaction ${pending.txHash}` +
++          (sameSet
++            ? "; to replace it, raise both fees by at least 10%"
++            : "; a replacement must touch exactly the same payer keys"),
++        RpcErrorCodes.INVALID_USEROP
++      );
++    }
++    return outbid;
++  }
++
+   /**
+    * Pending frame transactions never owe an account more than its balance:
+    * the sum of `frameTxObligations` (payer: max gas cost; sender: top-level
+@@ -416,12 +482,15 @@ export class MempoolService {
+    */
+   private async checkBalanceObligations(
+     entry: MempoolEntry,
+-    replaced: MempoolEntry | null
++    replaced: MempoolEntry | null,
++    outbid: MempoolEntry | null = null
+   ): Promise<void> {
+     if (!this.getBalance) return;
+     const replacedKey = replaced ? this.getKey(replaced) : undefined;
++    const outbidKey = outbid ? this.getKey(outbid) : undefined;
+     const others = (await this.fetchPendingUserOps()).filter(
+-      (pending) => this.getKey(pending) !== replacedKey
++      (pending) =>
++        this.getKey(pending) !== replacedKey && this.getKey(pending) !== outbidKey
+     );
+     const totals = totalObligations(others);
+     for (const [address, amount] of frameTxObligations(entry)) {
+diff --git a/packages/executor/src/services/MempoolService/utils.ts b/packages/executor/src/services/MempoolService/utils.ts
+index d8bf9e0..e5b4baa 100644
+--- a/packages/executor/src/services/MempoolService/utils.ts
++++ b/packages/executor/src/services/MempoolService/utils.ts
+@@ -26,6 +26,7 @@ export function rawEntryToMempoolEntry(raw: IFrameTxMempoolEntry): MempoolEntry
+     revertReason: raw.revertReason,
+     includer: raw.includer,
+     maxCost: raw.maxCost,
++    payerKeys: raw.payerKeys,
+   });
+ }
+ 
+diff --git a/packages/executor/src/services/UserOpValidation/utils/validationPrefix.ts b/packages/executor/src/services/UserOpValidation/utils/validationPrefix.ts
+index 8a34f88..8c54696 100644
+--- a/packages/executor/src/services/UserOpValidation/utils/validationPrefix.ts
++++ b/packages/executor/src/services/UserOpValidation/utils/validationPrefix.ts
+@@ -7,7 +7,12 @@ import { getAddress } from "viem";
+  * "Maximum amount of gas a node should expend validating signatures and
+  * simulating the validation prefix."
+  */
+-export const MAX_VERIFY_GAS = BigInt(100_000);
++export const MAX_VERIFY_GAS = BigInt(
++  // SIDECAR_MAX_VERIFY_GAS: a local stand-in for ERC-8421's staked budget (BUDGET-010,
++  // 2,500,000), for testing a staked payer whose proof check runs past 100,000.
++  (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env
++    ?.SIDECAR_MAX_VERIFY_GAS ?? "100000"
++);
+ 
+ /**
+  * EIP-8141's intrinsic cost per signature, by scheme - not stated in
+diff --git a/packages/executor/src/services/UserOpValidation/validators/frameTx.ts b/packages/executor/src/services/UserOpValidation/validators/frameTx.ts
+index ce5ef15..a021553 100644
+--- a/packages/executor/src/services/UserOpValidation/validators/frameTx.ts
++++ b/packages/executor/src/services/UserOpValidation/validators/frameTx.ts
+@@ -148,6 +148,19 @@ export interface FrameTxValidationResult {
+    * the real send path - this is what makes that gate live.
+    */
+   roleStakes: Partial<Record<EntityRole, StakeInfo & { addr: Hex }>>;
++  /**
++   * Payer keys (Nainokot privacy pool experiment, proposed for ERC-8421): the
++   * payer's own storage slots the validation prefix touched, sorted, when the
++   * payer is a staked entity other than the sender. The storage rules above
++   * only let a staked payer touch its own storage in validation, and a
++   * pending transaction can only be invalidated by another one through state
++   * its validation depends on, so these slots are exactly what two pending
++   * transactions paid by this payer must not share. For a shielded privacy pool
++   * they are its notes' nullifier slots. `MempoolService` admits at most one
++   * pending transaction per (payer, key) and lets another take it over only
++   * with the same keys and a fee bump.
++   */
++  payerKeys: string[];
+ }
+ 
+ /**
+@@ -904,12 +917,25 @@ export class FrameTxValidationService {
+       ]);
+     }
+ 
++    let payerKeys: string[] = [];
++    const payerInfo = roleStakes.payer;
++    if (payerInfo && payerInfo.addr.toLowerCase() !== sender) {
++      const payerSlots = accessedSlots[payerInfo.addr.toLowerCase()];
++      if (payerSlots && payerSlots.size > 0) {
++        const stake = await this.checkStakeCached(payerInfo, stakeCheckCache);
++        if (stake.code === 0) {
++          payerKeys = [...payerSlots].map((k) => k.toLowerCase()).sort();
++        }
++      }
++    }
++
+     return {
+       mempoolMembership: {
+         [this.networkConfig.standardMempoolId]: satisfiesStandardMempool,
+       },
+       accessedSlots,
+       roleStakes,
++      payerKeys,
+     };
+   }
+ }
+diff --git a/packages/executor/test/services/MempoolService/payerKeys.test.ts b/packages/executor/test/services/MempoolService/payerKeys.test.ts
+new file mode 100644
+index 0000000..4c538a0
+--- /dev/null
++++ b/packages/executor/test/services/MempoolService/payerKeys.test.ts
+@@ -0,0 +1,179 @@
++import { describe, it, expect, vi } from "vitest";
++import { keccak256 } from "viem";
++import { FrameTransaction, FRAME_MODE, APPROVE_SCOPE } from "@skandha/types/lib/contracts/FrameTx.js";
++import { MempoolEntryStatus } from "@skandha/types/lib/executor";
++import { MempoolService } from "../../../src/services/MempoolService/service.js";
++import { ExecutorEventBus } from "../../../src/services/SubscriptionService.js";
++import { encodeRawFrameTx } from "../../../src/services/FrameTxService/codec.js";
++
++// Payer keys (Nainokot privacy pool experiment): at most one pending transaction per (payer, key),
++// whoever its sender is; another takes the keys over only with exactly the same keys and a 10%
++// fee bump. For a shielded privacy pool the keys are its notes' nullifier slots.
++
++const POOL = "0x9999999999999999999999999999999999999999" as const;
++const OTHER_POOL = "0x8888888888888888888888888888888888888888" as const;
++const sender = (i: number) => `0x${(i + 1).toString(16).padStart(40, "0")}` as `0x${string}`;
++const NF = (i: number) => `0x${(i + 1).toString(16).padStart(64, "0")}`;
++
++function memoryDb() {
++  const m = new Map<string, any>();
++  return {
++    get: async (k: string) => {
++      if (!m.has(k)) throw new Error("Not Found");
++      return m.get(k);
++    },
++    put: async (k: string, v: any) => {
++      m.set(k, v);
++    },
++    del: async (k: string) => {
++      m.delete(k);
++    },
++    getMany: async (ks: string[]) => ks.map((k) => m.get(k)).filter(Boolean),
++  } as any;
++}
++
++const build = () =>
++  new MempoolService(
++    memoryDb(),
++    1,
++    { updateIncludedStatus: vi.fn().mockResolvedValue(undefined) } as any,
++    new ExecutorEventBus(),
++    { useropsTTL: 300, archiveDuration: 1 } as any,
++    { debug: vi.fn(), error: vi.fn() } as any
++  );
++
++/** [only_verify(sender)] [pay(payer)] [SENDER call]: the user is the sender, the pool pays. */
++const sponsored = (from: `0x${string}`, fee = 10n, payer: `0x${string}` = POOL): FrameTransaction => ({
++  chainId: 1n,
++  nonceKeys: [0n],
++  nonceSeq: 0n,
++  sender: from,
++  frames: [
++    {
++      mode: FRAME_MODE.VERIFY,
++      flags: APPROVE_SCOPE.EXECUTION,
++      target: null,
++      limits: { execution: 30_000n, state: 0n },
++      value: 0n,
++      data: "0x",
++    },
++    {
++      mode: FRAME_MODE.VERIFY,
++      flags: APPROVE_SCOPE.PAYMENT,
++      target: payer,
++      limits: { execution: 300_000n, state: 0n },
++      value: 0n,
++      data: "0x",
++    },
++    {
++      mode: FRAME_MODE.SENDER,
++      flags: 0,
++      target: "0x7777777777777777777777777777777777777777",
++      limits: { execution: 50_000n, state: 0n },
++      value: 0n,
++      data: "0x",
++    },
++  ],
++  signatures: [],
++  fees: { maxPriorityFeePerGas: fee, maxFeePerGas: fee, maxFeePerBlobGas: 0n },
++  blobVersionedHashes: [],
++  recentRootReferences: [],
++});
++
++const hashOf = (t: FrameTransaction) => keccak256(encodeRawFrameTx(t));
++const add = (pool: MempoolService, t: FrameTransaction, keys: string[]) =>
++  pool.addFrameTx(t, hashOf(t), undefined, undefined, undefined, undefined, undefined, keys);
++const pending = async (pool: MempoolService) =>
++  (await pool.fetchPendingUserOps())
++    .filter((e) => e.status === MempoolEntryStatus.New)
++    .map((e) => e.txHash)
++    .sort();
++
++describe("MempoolService - payer keys (one pending tx per (payer, nullifier))", () => {
++  it("admits many sponsored txs of one pool that spend different notes", async () => {
++    const pool = build();
++    const txs = Array.from({ length: 10 }, (_, i) => sponsored(sender(i)));
++    for (const [i, t] of txs.entries()) {
++      expect((await add(pool, t, [NF(2 * i), NF(2 * i + 1)])).replacedTxHash).toBeUndefined();
++    }
++    expect(await pending(pool)).toEqual(txs.map(hashOf).sort());
++  });
++
++  it("refuses a second tx of the same pool and nullifier from another sender at the same fee", async () => {
++    const pool = build();
++    const first = sponsored(sender(0));
++    await add(pool, first, [NF(0), NF(1)]);
++    await expect(add(pool, sponsored(sender(1)), [NF(0), NF(1)])).rejects.toThrow(
++      new RegExp(`key ${NF(0)} is already held by pending transaction ${hashOf(first)}; to replace it, raise both fees`)
++    );
++    expect(await pending(pool)).toEqual([hashOf(first)]);
++  });
++
++  it("refuses a bump under 10%", async () => {
++    const pool = build();
++    await add(pool, sponsored(sender(0), 100n), [NF(0), NF(1)]);
++    await expect(add(pool, sponsored(sender(1), 109n), [NF(0), NF(1)])).rejects.toThrow(/raise both fees/);
++  });
++
++  it("lets the same nullifiers take over with a 10% fee bump, cancelling the old tx", async () => {
++    const pool = build();
++    const first = sponsored(sender(0), 100n);
++    await add(pool, first, [NF(0), NF(1)]);
++    const bumped = sponsored(sender(1), 110n);
++    expect((await add(pool, bumped, [NF(0), NF(1)])).replacedTxHash).toBe(hashOf(first));
++    expect(await pending(pool)).toEqual([hashOf(bumped)]);
++    const old = await pool.getEntryByHash(hashOf(first));
++    expect(old?.status).toBe(MempoolEntryStatus.Cancelled);
++    expect(old?.revertReason).toMatch(/replaced by .*same payer keys/);
++  });
++
++  it("refuses a partial overlap even with a higher fee", async () => {
++    const pool = build();
++    await add(pool, sponsored(sender(0), 100n), [NF(0), NF(1)]);
++    await expect(add(pool, sponsored(sender(1), 200n), [NF(1), NF(2)])).rejects.toThrow(
++      /a replacement must touch exactly the same payer keys/
++    );
++  });
++
++  it("refuses a tx that would take over two pending ones at once", async () => {
++    const pool = build();
++    await add(pool, sponsored(sender(0), 100n), [NF(0), NF(1)]);
++    await add(pool, sponsored(sender(1), 100n), [NF(2), NF(3)]);
++    await expect(add(pool, sponsored(sender(2), 200n), [NF(0), NF(1), NF(2), NF(3)])).rejects.toThrow(
++      /a replacement must touch exactly the same payer keys/
++    );
++    expect(await pending(pool)).toHaveLength(2);
++  });
++
++  it("keeps different payers apart: the same slot of another pool is no conflict", async () => {
++    const pool = build();
++    await add(pool, sponsored(sender(0)), [NF(0), NF(1)]);
++    await add(pool, sponsored(sender(1), 10n, OTHER_POOL), [NF(0), NF(1)]);
++    expect(await pending(pool)).toHaveLength(2);
++  });
++
++  it("frees the keys once the holder is no longer pending", async () => {
++    const pool = build();
++    const first = sponsored(sender(0));
++    await add(pool, first, [NF(0), NF(1)]);
++    const [entry] = await pool.fetchPendingUserOps();
++    await pool.updateStatus([entry], MempoolEntryStatus.Finalized);
++    await add(pool, sponsored(sender(1)), [NF(0), NF(1)]);
++    expect(await pending(pool)).toHaveLength(1);
++  });
++
++  it("does nothing for txs without payer keys (self-paying or unstaked payers)", async () => {
++    const pool = build();
++    await add(pool, sponsored(sender(0)), []);
++    await add(pool, sponsored(sender(1)), []);
++    expect(await pending(pool)).toHaveLength(2);
++  });
++
++  it("survives a round trip through storage", async () => {
++    const pool = build();
++    const first = sponsored(sender(0));
++    await add(pool, first, [NF(0), NF(1)]);
++    const [entry] = await pool.fetchPendingUserOps();
++    expect(entry.payerKeys).toEqual([NF(0), NF(1)]);
++  });
++});
