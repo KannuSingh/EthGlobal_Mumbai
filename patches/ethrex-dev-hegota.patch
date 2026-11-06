@@ -1,0 +1,174 @@
+diff --git a/crates/blockchain/dev/block_producer.rs b/crates/blockchain/dev/block_producer.rs
+index 15e1f22..872546a 100644
+--- a/crates/blockchain/dev/block_producer.rs
++++ b/crates/blockchain/dev/block_producer.rs
+@@ -2,7 +2,9 @@ use bytes::Bytes;
+ use ethereum_types::{Address, H256};
+ use ethrex_common::types::ChainConfig;
+ use ethrex_rpc::clients::{EngineClient, EngineClientError};
+-use ethrex_rpc::types::fork_choice::{ForkChoiceState, PayloadAttributesV3, PayloadAttributesV4};
++use ethrex_rpc::types::fork_choice::{
++    ForkChoiceState, PayloadAttributesV3, PayloadAttributesV4, PayloadAttributesV5,
++};
+ use sha2::{Digest, Sha256};
+ use std::time::{Duration, SystemTime, UNIX_EPOCH};
+ use tokio::time::sleep;
+@@ -63,7 +65,25 @@ pub async fn start_block_producer(config: BlockProducerConfig) -> Result<(), Eng
+         // and MUST use forkchoiceUpdatedV4; V3 attributes are rejected for an
+         // Amsterdam timestamp.
+         let is_amsterdam = chain_config.is_amsterdam_activated(timestamp);
+-        let fork_choice_result = if is_amsterdam {
++        // Hegota attributes are refused by V4 and go through V5 (empty inclusion list).
++        let is_hegota = chain_config.is_hegota_activated(timestamp);
++        let fork_choice_result = if is_hegota {
++            engine_client
++                .engine_forkchoice_updated_v5(
++                    fork_choice_state,
++                    Some(PayloadAttributesV5 {
++                        timestamp,
++                        prev_randao: H256::zero(),
++                        suggested_fee_recipient: coinbase_address,
++                        withdrawals: Some(Vec::new()),
++                        parent_beacon_block_root: Some(parent_beacon_block_root),
++                        slot_number,
++                        inclusion_list_transactions: Vec::new(),
++                        target_gas_limit,
++                    }),
++                )
++                .await
++        } else if is_amsterdam {
+             engine_client
+                 .engine_forkchoice_updated_v4(
+                     fork_choice_state,
+@@ -92,7 +112,9 @@ pub async fn start_block_producer(config: BlockProducerConfig) -> Result<(), Eng
+                 )
+                 .await
+         };
+-        let fcu_endpoint = if is_amsterdam {
++        let fcu_endpoint = if is_hegota {
++            "engine_forkchoiceUpdatedV5"
++        } else if is_amsterdam {
+             "engine_forkchoiceUpdatedV4"
+         } else {
+             "engine_forkchoiceUpdatedV3"
+@@ -166,12 +188,22 @@ pub async fn start_block_producer(config: BlockProducerConfig) -> Result<(), Eng
+         // Amsterdam+ payloads carry a Block Access List and MUST use newPayloadV5;
+         // earlier forks use V4, which rejects the BAL field.
+         let is_amsterdam = execution_payload.block_access_list.is_some();
+-        let endpoint = if is_amsterdam {
++        let endpoint = if is_hegota {
++            "engine_newPayloadV6"
++        } else if is_amsterdam {
+             "engine_newPayloadV5"
+         } else {
+             "engine_newPayloadV4"
+         };
+-        let new_payload_result = if is_amsterdam {
++        let new_payload_result = if is_hegota {
++            engine_client
++                .engine_new_payload_v6(
++                    execution_payload,
++                    versioned_hashes,
++                    parent_beacon_block_root,
++                )
++                .await
++        } else if is_amsterdam {
+             engine_client
+                 .engine_new_payload_v5(
+                     execution_payload,
+diff --git a/crates/networking/rpc/clients/auth/mod.rs b/crates/networking/rpc/clients/auth/mod.rs
+index dedd410..41eb58d 100644
+--- a/crates/networking/rpc/clients/auth/mod.rs
++++ b/crates/networking/rpc/clients/auth/mod.rs
+@@ -1,14 +1,16 @@
+ use crate::{
+     engine::{
+         ExchangeCapabilitiesRequest,
+-        fork_choice::{ForkChoiceUpdatedV3, ForkChoiceUpdatedV4},
++        fork_choice::{ForkChoiceUpdatedV3, ForkChoiceUpdatedV4, ForkChoiceUpdatedV5},
+         payload::{
+             GetPayloadV5Request, GetPayloadV6Request, NewPayloadV4Request, NewPayloadV5Request,
++            NewPayloadV6Request,
+         },
+     },
+     types::{
+         fork_choice::{
+             ForkChoiceResponse, ForkChoiceState, PayloadAttributesV3, PayloadAttributesV4,
++            PayloadAttributesV5,
+         },
+         payload::{ExecutionPayload, ExecutionPayloadResponse, PayloadStatus},
+     },
+@@ -131,6 +133,33 @@ impl EngineClient {
+         }
+     }
+ 
++    /// Hegota: forkchoiceUpdatedV4 rejects Hegota-timestamp attributes, so the dev
++    /// producer drives Hegota blocks through V5 with an empty inclusion list.
++    pub async fn engine_forkchoice_updated_v5(
++        &self,
++        state: ForkChoiceState,
++        payload_attributes: Option<PayloadAttributesV5>,
++    ) -> Result<ForkChoiceResponse, EngineClientError> {
++        let request = RpcRequest::from(ForkChoiceUpdatedV5 {
++            fork_choice_state: state,
++            payload_attributes,
++        });
++
++        match self.send_request(request).await? {
++            RpcResponse::Success(result) => serde_json::from_value(result.result)
++                .map_err(ForkChoiceUpdatedError::SerdeJSONError)
++                .map_err(EngineClientError::from),
++            RpcResponse::Error(error_response) => {
++                let error_message = if let Some(data) = error_response.error.data {
++                    format!("{}: {:?}", error_response.error.message, data)
++                } else {
++                    error_response.error.message.to_string()
++                };
++                Err(ForkChoiceUpdatedError::RPCError(error_message).into())
++            }
++        }
++    }
++
+     pub async fn engine_get_payload_v5(
+         &self,
+         payload_id: u64,
+@@ -239,6 +268,39 @@ impl EngineClient {
+         }
+     }
+ 
++    /// Hegota variant: newPayloadV5 rejects Hegota payloads. The dev producer sends
++    /// no execution requests and an empty inclusion list.
++    pub async fn engine_new_payload_v6(
++        &self,
++        execution_payload: ExecutionPayload,
++        expected_blob_versioned_hashes: Vec<H256>,
++        parent_beacon_block_root: H256,
++    ) -> Result<PayloadStatus, EngineClientError> {
++        let request = NewPayloadV6Request {
++            payload: execution_payload,
++            expected_blob_versioned_hashes,
++            parent_beacon_block_root,
++            execution_requests: vec![],
++            inclusion_list_transactions: vec![],
++            raw_bal_hash: None,
++        }
++        .into();
++
++        match self.send_request(request).await? {
++            RpcResponse::Success(result) => serde_json::from_value(result.result)
++                .map_err(NewPayloadError::SerdeJSONError)
++                .map_err(EngineClientError::from),
++            RpcResponse::Error(error_response) => {
++                let error_message = if let Some(data) = error_response.error.data {
++                    format!("{}: {:?}", error_response.error.message, data)
++                } else {
++                    error_response.error.message.to_string()
++                };
++                Err(NewPayloadError::RPCError(error_message).into())
++            }
++        }
++    }
++
+     fn auth_token(&self) -> Result<String, EngineClientError> {
+         // Header
+         let header = jsonwebtoken::Header::default();

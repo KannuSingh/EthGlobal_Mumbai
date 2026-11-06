@@ -1,0 +1,42 @@
+diff --git a/src/frametx.ts b/src/frametx.ts
+index b93ac89..0bc5caf 100644
+--- a/src/frametx.ts
++++ b/src/frametx.ts
+@@ -143,6 +143,16 @@ export function envelopeRoots(chainId: bigint): boolean {
+   return ENVELOPE_ROOT_CHAINS.has(chainId);
+ }
+ 
++/**
++ * The proof frame's execution limit on those chains. msp's 225,000 runs out of gas on that
++ * client (forshtat/ethrex eip8141-tracer); the verifier call is capped at 500,000 inside the
++ * frame anyway, and the dispatcher pins neither. NAINOKOT_VERIFY_GAS overrides it in Node.
++ */
++export const ENVELOPE_VERIFY_FRAME_GAS: bigint = BigInt(
++  (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env
++    ?.NAINOKOT_VERIFY_GAS ?? "450000",
++);
++
+ /** The reference a 72-byte EIP-8272 tuple names: source_id, uint64_be(slot), root. */
+ export function recentRootRefOf(tuple: Uint8Array): RecentRootRef {
+   if (tuple.length !== 72) throw new RangeError(`a recent-root tuple is 72 bytes, got ${tuple.length}`);
+diff --git a/src/spend.ts b/src/spend.ts
+index 71f108d..aa47bf5 100644
+--- a/src/spend.ts
++++ b/src/spend.ts
+@@ -19,6 +19,7 @@ import {
+ import { InputError, PoolError } from "./errors.ts";
+ import {
+   addressOf,
++  ENVELOPE_VERIFY_FRAME_GAS,
+   APPROVE,
+   executionCapUsage,
+   MODE,
+@@ -247,7 +248,7 @@ export function spendFrames(spend: {
+       mode: MODE.VERIFY,
+       flags: APPROVE.EXECUTION_AND_PAYMENT,
+       target: pool,
+-      gasLimit: gas.VERIFY_FRAME_GAS,
++      gasLimit: spend.envelope ? ENVELOPE_VERIFY_FRAME_GAS : gas.VERIFY_FRAME_GAS,
+       stateLimit: gas.VERIFY_FRAME_STATE_GAS,
+       value: 0n,
+       data: proof,

@@ -1,0 +1,14 @@
+# Fetched and built by scripts/setup.sh, or made when running
+node_modules/
+deps.nosync/
+altlocal.nosync/
+*.nosync/
+privacy-pool/contracts/out/
+privacy-pool/contracts/cache/
+privacy-pool/extension/out/
+privacy-pool/extension/out-*.png
+# Keys never go in git
+*.key
+.env
+# macOS
+.DS_Store

@@ -1,0 +1,266 @@
+diff --git a/src/frametx.ts b/src/frametx.ts
+index 06c306f..b93ac89 100644
+--- a/src/frametx.ts
++++ b/src/frametx.ts
+@@ -120,6 +120,53 @@ export interface FrameTx {
+   maxFee: bigint;
+   maxBlobFee: bigint;
+   blobHashes: Uint8Array[];
++  /**
++   * EIP-8272 references in a ninth envelope field, the dialect of the ERC-8421 alt mempool
++   * devnet (chain 1337, forshtat/ethrex eip8141-tracer). Undefined keeps the eight-field
++   * envelope above; an empty list still writes the field, which that chain requires.
++   */
++  recentRootRefs?: RecentRootRef[];
++}
++
++/** An EIP-8272 reference as the envelope declares it: RLP [source_id, slot, root]. */
++export interface RecentRootRef {
++  sourceId: Uint8Array;
++  slot: bigint;
++  root: Uint8Array;
++}
++
++/** Chains whose envelope carries the recent-root references instead of a verifier frame 0. */
++export const ENVELOPE_ROOT_CHAINS: ReadonlySet<bigint> = new Set([1337n]);
++
++/** Whether spends on this chain declare their root in the envelope (see recentRootRefs). */
++export function envelopeRoots(chainId: bigint): boolean {
++  return ENVELOPE_ROOT_CHAINS.has(chainId);
++}
++
++/** The reference a 72-byte EIP-8272 tuple names: source_id, uint64_be(slot), root. */
++export function recentRootRefOf(tuple: Uint8Array): RecentRootRef {
++  if (tuple.length !== 72) throw new RangeError(`a recent-root tuple is 72 bytes, got ${tuple.length}`);
++  return {
++    sourceId: tuple.slice(0, 32),
++    slot: toBigint(tuple.subarray(32, 40)),
++    root: tuple.slice(40, 72),
++  };
++}
++
++/** rlp(recent_root_references), or no bytes when none is declared, as ethrex prices it. */
++export function recentRootCalldata(tx: FrameTx): Uint8Array {
++  const refs = tx.recentRootRefs ?? [];
++  return refs.length === 0 ? new Uint8Array(0) : encodeRefs(refs);
++}
++
++function encodeRefs(refs: readonly RecentRootRef[]): Uint8Array {
++  return rlpList(refs.map((r) => rlpList([rlpBytes(r.sourceId), rlpInt(r.slot), rlpBytes(r.root)])));
++}
++
++/** EIP-8272 reference intrinsic gas: 2,400 for the address plus 2,002 per reference. */
++export function recentRootRefGas(tx: FrameTx): bigint {
++  const count = BigInt(tx.recentRootRefs?.length ?? 0);
++  return count === 0n ? 0n : 2_400n + 2_002n * count;
+ }
+ 
+ /** Frame modes: DEFAULT runs as the entry point, VERIFY validates, SENDER runs as the sender. */
+@@ -175,6 +222,7 @@ function envelope(tx: FrameTx, elide: boolean): Uint8Array {
+     rlpList(tx.signatures.map(signature)),
+     rlpList([rlpInt(tx.maxPriorityFee), rlpInt(tx.maxFee), rlpInt(tx.maxBlobFee)]),
+     rlpList(tx.blobHashes.map(rlpBytes)),
++    ...(tx.recentRootRefs === undefined ? [] : [encodeRefs(tx.recentRootRefs)]),
+   ]);
+ }
+ 
+@@ -207,6 +255,7 @@ function dataFields(tx: FrameTx): Uint8Array[] {
+     ...tx.frames.map((frame) => frame.data),
+     ...tx.signatures.flatMap((sig) => [address20(sig.signer), sig.msg, sig.signature]),
+     concat(rlpList(tx.nonceKeys.map(rlpInt)), rlpInt(tx.nonceSeq)),
++    recentRootCalldata(tx),
+   ];
+ }
+ 
+@@ -242,7 +291,8 @@ export function valueTransferCost(tx: FrameTx): bigint {
+  */
+ export function mandatoryGas(tx: FrameTx): bigint {
+   const frames = 475n * BigInt(tx.frames.length);
+-  return 12_000n + frames + signatureVerificationCost(tx) + valueTransferCost(tx);
++  const fixed = 12_000n + frames + signatureVerificationCost(tx) + valueTransferCost(tx);
++  return fixed + recentRootRefGas(tx);
+ }
+ 
+ /** The declared EIP-8037 state budgets of all frames. */
+diff --git a/src/rpc.ts b/src/rpc.ts
+index d980aea..66e850f 100644
+--- a/src/rpc.ts
++++ b/src/rpc.ts
+@@ -151,7 +151,7 @@ export function poolNode(url: string): PoolNode {
+     call,
+     async simulate(raw) {
+       try {
+-        return await call("ethrex_simulateFrameTransaction", [raw]);
++        return canonicalSimulation(await call("ethrex_simulateFrameTransaction", [raw]));
+       } catch (error) {
+         if (!(error instanceof RpcError)) throw error;
+         if (error.code === -32601) return null;
+@@ -161,6 +161,22 @@ export function poolNode(url: string): PoolNode {
+   };
+ }
+ 
++/**
++ * The ERC-8421 alt mempool devnet (chain 1337) answers a simulation with canonicalMempoolValid
++ * and canonicalMempoolViolation instead of valid and violation; this fills in the two fields
++ * the rest of the client reads. An answer that has valid is returned as it is.
++ */
++function canonicalSimulation(result: unknown): unknown {
++  if (typeof result !== "object" || result === null || Array.isArray(result)) return result;
++  const r = result as Record<string, unknown>;
++  if (r.valid !== undefined || r.canonicalMempoolValid === undefined) return result;
++  return {
++    ...r,
++    valid: r.canonicalMempoolValid === true && r.executionStatus !== "failure",
++    violation: r.canonicalMempoolViolation ?? r.executionError ?? null,
++  };
++}
++
+ // ---- the chain, as disclosure and note scanning read it ----
+ 
+ /** A log as the node returns it; only these fields are read. */
+diff --git a/src/send.ts b/src/send.ts
+index cd69ab8..8b88c4a 100644
+--- a/src/send.ts
++++ b/src/send.ts
+@@ -12,11 +12,13 @@ import { hexPadded, maxBigint, parseHex, parseUint, toHex } from "./bytes.ts";
+ import { PoolError } from "./errors.ts";
+ import {
+   addressOf,
++  envelopeRoots,
+   APPROVE,
+   checksumAddress,
+   maxCost,
+   MODE,
+   rawTx,
++  recentRootRefOf,
+   sigHash,
+   totalGasLimit,
+   type FrameTx,
+@@ -136,8 +138,11 @@ export function spendVerdict(
+   const notes: string[] = [];
+   const refuse = (refusal: string) => ({ notes, refusal });
+   const { frames, result } = sim;
+-  const settled = frames[2]?.succeeded === true;
+-  const tailFailed = tailKind !== null && frames[3]?.succeeded !== true;
++  // Settlement is the last frame, or the one before a tail: frame 2 when frame 0 carries the
++  // recent root, frame 1 when the envelope does (chain 1337).
++  const settleAt = frameCount - (tailKind !== null ? 2 : 1);
++  const settled = frames[settleAt]?.succeeded === true;
++  const tailFailed = tailKind !== null && frames[settleAt + 1]?.succeeded !== true;
+   if (!sim.valid) {
+     if (settled && tailKind === "action") {
+       return refuse(
+@@ -161,7 +166,7 @@ export function spendVerdict(
+     );
+   }
+   if (!settled) {
+-    return refuse("  simulate: settlement frame 2 did not explicitly succeed; not sending");
++    return refuse(`  simulate: settlement frame ${settleAt} did not explicitly succeed; not sending`);
+   }
+   if (tailFailed && tailKind === "action") {
+     return refuse(
+@@ -175,7 +180,7 @@ export function spendVerdict(
+         "would remain and can be claimed later.",
+     );
+   }
+-  if (frames.length !== frameCount || frames.some((f, i) => i !== 3 && !f.succeeded)) {
++  if (frames.length !== frameCount || frames.some((f, i) => i !== settleAt + 1 && !f.succeeded)) {
+     return refuse("  simulate: settlement succeeded but another frame failed; not sending");
+   }
+   if (tailFailed) {
+@@ -236,6 +241,7 @@ export async function buildAndSend(
+       );
+     }
+   }
++  const envelope = envelopeRoots(chainId);
+   const build = (senderGas = gas.SETTLE_FRAME_GAS): FrameTx => {
+     const tx: FrameTx = {
+       chainId,
+@@ -244,7 +250,7 @@ export async function buildAndSend(
+       sender: spend ? pool : signer,
+       frames:
+         send.kind === "spend"
+-          ? spendFrames({ ...send, pool, tail, settleGas: senderGas })
++          ? spendFrames({ ...send, pool, tail, settleGas: senderGas, envelope })
+           : [
+               // The account's default code checks the signature and approves both.
+               {
+@@ -271,6 +277,9 @@ export async function buildAndSend(
+       maxFee,
+       maxBlobFee: 0n,
+       blobHashes: [],
++      ...(envelope
++        ? { recentRootRefs: send.kind === "spend" ? [recentRootRefOf(send.recentRoot)] : [] }
++        : {}),
+     };
+     checkTxResourceLimits(signTransaction(tx, key));
+     return tx;
+@@ -312,7 +321,9 @@ export async function buildAndSend(
+   } else if (sim === null) {
+     io.log("  simulate: ethrex_simulateFrameTransaction unavailable here; default gas limits");
+   } else {
+-    if (!sim.valid) throw new PoolError(`  simulate: INVALID (${show(r.violation)}); not sending`);
++    if (!sim.valid) {
++      throw new PoolError(`  simulate: INVALID (${show(r.violation)}); not sending\n  ${show(r)}`);
++    }
+     if ((status ?? "success") !== "success") {
+       const hint =
+         value > 0n
+@@ -350,7 +361,7 @@ export async function buildAndSend(
+   io.log(`  submitted: ${show(hash)}`);
+   for (let poll = 0; poll < 30; poll++) {
+     const receipt = await node.call("eth_getTransactionReceipt", [hash]);
+-    if (receipt !== null) return checkReceipt(io, receipt, spend, tailKind);
++    if (receipt !== null) return checkReceipt(io, receipt, spend, tailKind, tx.frames.length);
+     await (io.sleep ?? delay)(2_000);
+   }
+   throw new PoolError("  not mined within timeout");
+@@ -367,6 +378,7 @@ function checkReceipt(
+   receipt: unknown,
+   spend: { allowFailedClaim?: boolean } | null,
+   tailKind: TailKind,
++  frameCount: number,
+ ): JsonObject {
+   if (!isObject(receipt)) {
+     throw new PoolError(`  eth_getTransactionReceipt returned ${show(receipt)}, not a receipt`);
+@@ -383,7 +395,8 @@ function checkReceipt(
+     return receipt;
+   }
+   const frames = Array.isArray(receipt.frameReceipts) ? receipt.frameReceipts : [];
+-  const [settlement, tailStatus] = [get(frames[2], "status"), get(frames[3], "status")];
++  const settleAt = frameCount - (tailKind !== null ? 2 : 1);
++  const [settlement, tailStatus] = [get(frames[settleAt], "status"), get(frames[settleAt + 1], "status")];
+   if (!FRAME_STATUSES.has(settlement)) {
+     throw new PoolError("  settlement outcome unavailable; inspect frame receipts before retrying");
+   }
+diff --git a/src/spend.ts b/src/spend.ts
+index 822f6e6..71f108d 100644
+--- a/src/spend.ts
++++ b/src/spend.ts
+@@ -226,10 +226,13 @@ export function spendFrames(spend: {
+   settle: Uint8Array;
+   tail?: Frame | null;
+   settleGas?: bigint;
++  /** Leave out frame 0: the root goes in the envelope (FrameTx.recentRootRefs). */
++  envelope?: boolean;
+ }): Frame[] {
+   const { pool, recentRoot, proof, settle, tail, settleGas = gas.SETTLE_FRAME_GAS } = spend;
+-  return [
+-    {
++  const rootFrame: Frame[] = spend.envelope
++    ? []
++    : [{
+       mode: MODE.VERIFY,
+       flags: APPROVE.NONE,
+       target: protocol.RECENT_ROOT_ADDRESS,
+@@ -237,7 +240,9 @@ export function spendFrames(spend: {
+       stateLimit: 0n,
+       value: 0n,
+       data: recentRoot,
+-    },
++    }];
++  return [
++    ...rootFrame,
+     {
+       mode: MODE.VERIFY,
+       flags: APPROVE.EXECUTION_AND_PAYMENT,

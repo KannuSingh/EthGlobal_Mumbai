@@ -1,0 +1,19 @@
+{
+  "name": "nainokot-wallet",
+  "private": true,
+  "description": "Nainokot Wallet: a privacy pool that pays gas for fresh, empty accounts on EIP-8141 frame transactions, and a Chrome extension wallet on it",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": { "node": ">=24.7" },
+  "scripts": {
+    "setup": "bash scripts/setup.sh",
+    "test:contracts": "NO_SIDECAR=1 bash privacy-pool/run.sh",
+    "build:extension": "node privacy-pool/extension/build.ts",
+    "demo": "node privacy-pool/extension/demo/serve.ts",
+    "test:extension": "node privacy-pool/extension/e2e.ts"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "playwright": "1.63.0"
+  }
+}
