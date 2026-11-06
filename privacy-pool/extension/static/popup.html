@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Nainokot Wallet</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="popup">
+<header class="topbar">
+  <div class="brand"><img class="logo-img" src="logo.svg" alt="">Nainokot</div>
+  <span class="chip" id="network-chip"><i class="dot"></i><span id="network-name">Local</span></span>
+</header>
+
+<div class="scroll">
+  <!-- Home -->
+  <section class="view" id="home">
+    <div class="hero">
+      <div class="hero-label" id="hero-label">Private funds</div>
+      <div class="hero-amount"><span id="balance">…</span><span class="unit">ETH</span></div>
+      <div class="hero-sub" id="notes">Pays the gas for all your accounts. Nobody can tell whose it is.</div>
+      <div class="hero-actions"><button class="hero-btn" id="add"></button></div>
+    </div>
+    <div class="state" id="privacy-state"></div>
+    <div class="section-title">Connected sites</div>
+    <div class="card"><ul class="list" id="sites"></ul></div>
+  </section>
+
+  <!-- Accounts -->
+  <section class="view" id="accounts" hidden>
+    <div class="segmented" role="tablist">
+      <button id="seg-private" class="active" data-kind="private">Private <span class="count" id="count-private">0</span></button>
+      <button id="seg-public" data-kind="public">Public <span class="count" id="count-public">0</span></button>
+    </div>
+    <p class="muted small" id="accounts-help" style="margin:-4px 2px"></p>
+    <div class="card"><ul class="list" id="account-list"></ul></div>
+  </section>
+
+  <!-- History -->
+  <section class="view" id="history" hidden>
+    <div class="card"><ul class="list" id="history-list"></ul></div>
+  </section>
+
+  <!-- Settings -->
+  <section class="view" id="settings" hidden>
+    <div class="section-title">Privacy</div>
+    <div class="card rows">
+      <div>
+        <div class="grow"><b>New account for every transaction</b><span class="sub" id="default-sub"></span></div>
+        <label class="switch"><input type="checkbox" id="default-private" aria-label="New account for every transaction"><span></span></label>
+      </div>
+    </div>
+    <div class="section-title">Private funds</div>
+    <div class="card rows">
+      <div class="kv"><span class="muted">Balance</span><span id="settings-balance"></span></div>
+      <div class="kv"><span class="muted">Held in</span><span id="settings-notes"></span></div>
+    </div>
+    <div class="section-title">Network</div>
+    <div class="card rows">
+      <div class="kv"><span class="muted">Chain</span><span id="settings-chain"></span></div>
+      <div class="kv"><span class="muted">Node</span><span class="mono" id="settings-rpc"></span></div>
+      <div class="kv"><span class="muted">Sent</span><span id="settings-via"></span></div>
+    </div>
+    <button class="btn danger block" id="disconnect-all">Disconnect all sites</button>
+  </section>
+
+  <!-- One site -->
+  <section class="view" id="site" hidden></section>
+</div>
+
+<nav class="tabbar" id="tabbar">
+  <button data-view="home" class="active"></button>
+  <button data-view="accounts"></button>
+  <button data-view="history"></button>
+  <button data-view="settings"></button>
+</nav>
+<div class="toast" id="status" role="status"></div>
+<script type="module" src="popup.js"></script>
+</body>
+</html>

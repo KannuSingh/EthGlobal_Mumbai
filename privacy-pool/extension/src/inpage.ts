@@ -1,0 +1,52 @@
+/**
+ * The provider a dapp sees (EIP-1193), injected into the page's own world, and announced over
+ * EIP-6963. Each request goes to the extension through the content script; nothing secret is
+ * here: keys, notes and proving stay in the extension.
+ */
+type Listener = (...args: any[]) => void;
+const listeners = new Map<string, Set<Listener>>();
+const waiting = new Map<number, { resolve: (v: any) => void; reject: (e: any) => void }>();
+let next = 1;
+
+window.addEventListener("message", (event) => {
+  if (event.source !== window || event.data?.target !== "nainokot-inpage") return;
+  const msg = event.data;
+  if (msg.event) {
+    for (const l of listeners.get(msg.event) ?? []) l(msg.data);
+    return;
+  }
+  const call = waiting.get(msg.id);
+  if (!call) return;
+  waiting.delete(msg.id);
+  if (msg.error) call.reject(Object.assign(new Error(msg.error.message), { code: msg.error.code, data: msg.error.data }));
+  else call.resolve(msg.result);
+});
+
+const provider = {
+  isPrivacyPool: true,
+  request({ method, params }: { method: string; params?: unknown[] | object }) {
+    const id = next++;
+    return new Promise((resolve, reject) => {
+      waiting.set(id, { resolve, reject });
+      window.postMessage({ target: "nainokot-content", id, method, params: params ?? [] }, window.location.origin);
+    });
+  },
+  on(event: string, l: Listener) {
+    if (!listeners.has(event)) listeners.set(event, new Set());
+    listeners.get(event)!.add(l);
+    return provider;
+  },
+  removeListener(event: string, l: Listener) {
+    listeners.get(event)?.delete(l);
+    return provider;
+  },
+};
+
+const ICON = "data:image/svg+xml;base64," + btoa(
+  "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 128 128\"><defs><linearGradient id=\"bg\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"><stop offset=\"0\" stop-color=\"#312e81\"/><stop offset=\"1\" stop-color=\"#0f0b2e\"/></linearGradient><linearGradient id=\"cloak\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"#eef2ff\"/><stop offset=\"1\" stop-color=\"#a5b4fc\"/></linearGradient><radialGradient id=\"iris\" cx=\".4\" cy=\".4\" r=\".7\"><stop offset=\"0\" stop-color=\"#a78bfa\"/><stop offset=\"1\" stop-color=\"#4f46e5\"/></radialGradient></defs><rect width=\"128\" height=\"128\" rx=\"30\" fill=\"url(#bg)\"/><path d=\"M64 9C54 13 37 25 34 47c-2 14-1 22-5 30-6 6-12 12-14 22l-4 19h106l-4-19c-2-10-8-16-14-22-4-8-3-16-5-30C91 25 74 13 64 9z\" fill=\"url(#cloak)\"/><path d=\"M43 90c-2 10-6 19-11 28M85 90c2 10 6 19 11 28M64 89v29\" stroke=\"#818cf8\" stroke-width=\"3\" stroke-linecap=\"round\" fill=\"none\" opacity=\".75\"/><path d=\"M64 21c-14 2-24 16-24 34 0 17 10 29 24 29s24-12 24-29c0-18-10-32-24-34z\" fill=\"#c7d2fe\"/><path d=\"M64 27c-12 2-19 14-19 28 0 14 8 24 19 24s19-10 19-24c0-14-7-26-19-28z\" fill=\"#0f0b2e\"/><path d=\"M48 55c5-8 10-11 16-11s11 3 16 11c-5 8-10 11-16 11s-11-3-16-11z\" fill=\"#fff\"/><circle cx=\"64\" cy=\"55\" r=\"8\" fill=\"url(#iris)\"/><circle cx=\"64\" cy=\"55\" r=\"3.6\" fill=\"#0f0b2e\"/><circle cx=\"61.4\" cy=\"52.4\" r=\"1.8\" fill=\"#fff\"/><circle cx=\"64\" cy=\"87\" r=\"3.2\" fill=\"#6366f1\"/></svg>");
+const info = { uuid: crypto.randomUUID(), name: "Nainokot Wallet", icon: ICON, rdns: "xyz.nainokot.wallet" };
+const announce = () =>
+  window.dispatchEvent(new CustomEvent("eip6963:announceProvider", { detail: Object.freeze({ info, provider }) }));
+window.addEventListener("eip6963:requestProvider", announce);
+announce();
+if (!(window as any).ethereum) (window as any).ethereum = provider;

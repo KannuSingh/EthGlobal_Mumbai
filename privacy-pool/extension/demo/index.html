@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Guest Book</title>
+<style>
+  :root { color-scheme: light dark; --accent: #1a73e8; --muted: #5f6368; --bg: #fff; --fg: #202124; --line: #dadce0; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #202124; --fg: #e8eaed; --muted: #9aa0a6; --line: #3c4043; --accent: #8ab4f8; } }
+  body { font: 15px/1.5 system-ui, sans-serif; margin: 0 auto; padding: 24px 16px; max-width: 560px; background: var(--bg); color: var(--fg); }
+  h1 { font-size: 22px; } .muted { color: var(--muted); }
+  input { font: inherit; width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: var(--fg); }
+  button { font: inherit; padding: 8px 16px; border-radius: 18px; border: 1px solid var(--accent); background: var(--accent); color: var(--bg); cursor: pointer; margin: 8px 8px 0 0; }
+  button.plain { background: transparent; color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  #log li { overflow-wrap: anywhere; margin: 4px 0; }
+  code { overflow-wrap: anywhere; }
+</style>
+</head>
+<body>
+<h1>Guest Book</h1>
+<p class="muted">A test dapp. Your account needs no ETH: a wallet with the privacyPaymaster capability pays the gas privately.</p>
+<button id="connect">Connect wallet</button>
+<p>Account <code id="account">not connected</code> · entries <span id="entries">–</span></p>
+<p id="caps" class="muted"></p>
+<p><input id="text" value="hello from the privacy pool" aria-label="Message"></p>
+<button id="calls" disabled>Sign (wallet_sendCalls, privacyPaymaster required)</button>
+<button id="tx" class="plain" disabled>Sign (eth_sendTransaction)</button>
+<ol id="log"></ol>
+<script type="module" src="app.js"></script>
+</body>
+</html>
