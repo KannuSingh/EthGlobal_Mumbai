@@ -3,30 +3,49 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Guest Book</title>
-<style>
-  :root { color-scheme: light dark; --accent: #1a73e8; --muted: #5f6368; --bg: #fff; --fg: #202124; --line: #dadce0; }
-  @media (prefers-color-scheme: dark) { :root { --bg: #202124; --fg: #e8eaed; --muted: #9aa0a6; --line: #3c4043; --accent: #8ab4f8; } }
-  body { font: 15px/1.5 system-ui, sans-serif; margin: 0 auto; padding: 24px 16px; max-width: 560px; background: var(--bg); color: var(--fg); }
-  h1 { font-size: 22px; } .muted { color: var(--muted); }
-  input { font: inherit; width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: var(--fg); }
-  button { font: inherit; padding: 8px 16px; border-radius: 18px; border: 1px solid var(--accent); background: var(--accent); color: var(--bg); cursor: pointer; margin: 8px 8px 0 0; }
-  button.plain { background: transparent; color: var(--accent); }
-  button:disabled { opacity: .5; cursor: default; }
-  #log li { overflow-wrap: anywhere; margin: 4px 0; }
-  code { overflow-wrap: anywhere; }
-</style>
+<!-- Posts are only ever shown as text, and this keeps any script but the page's own from running. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'">
+<link rel="icon" href="favicon.svg">
+<title>Framecaster</title>
+<link rel="stylesheet" href="style.css">
 </head>
 <body>
-<h1>Guest Book</h1>
-<p class="muted">A test dapp. Your account needs no ETH: a wallet with the privacyPaymaster capability pays the gas privately.</p>
-<button id="connect">Connect wallet</button>
-<p>Account <code id="account">not connected</code> · entries <span id="entries">–</span></p>
-<p id="caps" class="muted"></p>
-<p><input id="text" value="hello from the privacy pool" aria-label="Message"></p>
-<button id="calls" disabled>Sign (wallet_sendCalls, privacyPaymaster required)</button>
-<button id="tx" class="plain" disabled>Sign (eth_sendTransaction)</button>
-<ol id="log"></ol>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M8 9h8"/><path d="M8 13h5"/></svg></span>
+    <b>Framecaster</b>
+  </div>
+  <button id="connect" class="btn primary small">Connect</button>
+  <div id="me" class="me" hidden><span class="avatar" id="me-avatar"></span><b id="me-name"></b></div>
+</header>
+
+<main class="column">
+  <div class="compose">
+    <span class="avatar" id="compose-avatar"></span>
+    <div class="compose-main">
+      <div class="parts" id="parts">
+        <div class="part">
+          <textarea id="text" rows="2" aria-label="Your post" placeholder="What's happening?"></textarea>
+          <span class="part-count" id="count"></span>
+        </div>
+      </div>
+      <div class="compose-foot">
+        <button id="add-part" class="icon-add" disabled title="Add to thread" aria-label="Add to thread"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button>
+        <label class="expires" title="An expiry frame: the chain drops the post if it isn't mined by then">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2M9 2h6"/></svg>
+          <select id="expires" aria-label="Post expires">
+            <option value="0">No expiry</option>
+            <option value="60">Expires in 1 min</option>
+            <option value="600">Expires in 10 min</option>
+          </select>
+        </label>
+        <span class="error" id="error" role="alert" hidden></span>
+        <button id="calls" class="btn primary small" disabled>Post</button>
+      </div>
+    </div>
+  </div>
+  <ol class="feed" id="feed"><li class="empty">No posts yet.</li></ol>
+</main>
 <script type="module" src="app.js"></script>
 </body>
 </html>
