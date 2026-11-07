@@ -48,7 +48,10 @@ case ${1:-status} in
     [[ -f $DEPLOY ]] || { echo "run bash privacy-pool/deploy.sh first" >&2; exit 1; }
     mkdir -p "$DEV/data"
     # The relayer key is never used to sign (the privileged relayer signs nothing); the dev key.
-    jq -n --arg rpc "$RPC" --arg registry "$(jq -r .stakingRegistry "$DEPLOY")" \
+    # The precompiles a validation frame may call (0x01-0x11 and P256VERIFY 0x100);
+    # the pool's Groth16 check calls 0x06-0x08.
+    PRECOMPILES='["0x0000000000000000000000000000000000000001","0x0000000000000000000000000000000000000002","0x0000000000000000000000000000000000000003","0x0000000000000000000000000000000000000004","0x0000000000000000000000000000000000000005","0x0000000000000000000000000000000000000006","0x0000000000000000000000000000000000000007","0x0000000000000000000000000000000000000008","0x0000000000000000000000000000000000000009","0x000000000000000000000000000000000000000a","0x000000000000000000000000000000000000000b","0x000000000000000000000000000000000000000c","0x000000000000000000000000000000000000000d","0x000000000000000000000000000000000000000e","0x000000000000000000000000000000000000000f","0x0000000000000000000000000000000000000010","0x0000000000000000000000000000000000000011","0x0000000000000000000000000000000000000100"]'
+    jq -n --argjson precompiles "$PRECOMPILES" --arg rpc "$RPC" --arg registry "$(jq -r .stakingRegistry "$DEPLOY")" \
       --arg relayer "0x$(head -1 "$HERE/altlocal.nosync/funder.key" | sed 's/^0x//')" '{
       entryPoints: ["0x00000000000000000000000000000000000000aa"],
       canonicalEntryPoint: "0x00000000000000000000000000000000000000aa",
@@ -56,11 +59,12 @@ case ${1:-status} in
       supportedMempools: [{mempoolId: "QmcFZKUX9qoo3StwVycJTAhwdiqbEjcwNvQVK246p3z1rk",
         entryPoint: "0x00000000000000000000000000000000000000aa"}],
       relayers: [$relayer], rpcEndpoint: $rpc, rpcEndpointSubmit: $rpc,
-      stakingRegistryAddress: $registry, minUnstakeDelay: 86400
+      stakingRegistryAddress: $registry, minUnstakeDelay: 86400,
+      precompiles: $precompiles
     }' >"$DEV/config.json"
     chmod 600 "$DEV/config.json"
     # ERC-8421's staked budget (BUDGET-010) stands in for the sidecar's fixed 100,000.
-    (cd "$SRC" && SIDECAR_MAX_VERIFY_GAS=${SIDECAR_MAX_VERIFY_GAS:-2500000} nohup bun --bun \
+    (cd "$SRC" && SKANDHA_PRECOMPILES=$(jq -r 'join(",")' <<<"$PRECOMPILES") SIDECAR_MAX_VERIFY_GAS=${SIDECAR_MAX_VERIFY_GAS:-2500000} nohup bun --bun \
       packages/cli/bin/skandha.js standalone --configFile "$DEV/config.json" --dataDir "$DEV/data" \
       --api.address 127.0.0.1 --api.port "$PORT" --api.wsPort "$PORT" \
       --executor.bundlingMode manual >"$DEV/sidecar.log" 2>&1 & echo $! >"$PID")
