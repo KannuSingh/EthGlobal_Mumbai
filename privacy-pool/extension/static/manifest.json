@@ -4,7 +4,8 @@
   "version": "0.1.0",
   "description": "Nainokot Wallet: every site gets its own account, and gas is paid privately from your private funds (EIP-8141 local chain).",
   "permissions": [
-    "storage"
+    "storage",
+    "activeTab"
   ],
   "host_permissions": [
     "http://127.0.0.1/*",

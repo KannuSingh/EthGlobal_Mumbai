@@ -1,32 +1,18 @@
 /**
  * The approval window. For a connect, it asks which account the site gets (a new one by default,
  * or one already in use, which is linkable) and the site's setting. For a send, it shows the
- * calls and that gas comes from private funds, and on Confirm proves the spend in a Web Worker and
- * sends it: the user's notes and keys never leave the extension.
+ * frames and starts building the transaction at once (the private proof in a Web Worker): each
+ * frame card spins until it is built and checked, then ticks. Tap a card to inspect it; Send sends
+ * it, Cancel drops it and nothing is spent. The user's notes and keys never leave the extension.
  */
-import { addressOf, balance, makeRpc, sponsoredSend, sync } from "../../core.ts";
-import { accountList, config, load, save } from "./store.ts";
-import { $, accountAvatar, el, host, html, icon, short, shown, siteAvatar } from "./ui.ts";
+import { addressOf, balance, makeRpc, newAccountKey, sponsoredSend, sync, type Inspection } from "../../core.ts";
+import { accountList, config, load, pastUse, save, switchAccount } from "./store.ts";
+import { $, accountAvatar, el, explorerLink, host, html, icon, nameOf, rememberSite, short, shown, siteAvatar } from "./ui.ts";
+import { EXPIRY, frameMap, hexChip, txOverview, untilText } from "./frames.js";
+import { workerProver } from "./prover.ts";
 
 const id = new URLSearchParams(location.search).get("id")!;
 const reply = (r: object) => chrome.runtime.sendMessage({ type: "approval-reply", id, reply: r });
-
-function workerProver() {
-  const worker = new Worker("prover-worker.js", { type: "module" });
-  let n = 0;
-  const waiting = new Map<number, any>();
-  worker.onmessage = ({ data }) => {
-    const w = waiting.get(data.id);
-    waiting.delete(data.id);
-    if (data.error) w?.reject(new Error(data.error));
-    else w?.resolve({ publics: data.publics, proof: data.proof });
-  };
-  return (witness: any) => new Promise<any>((resolve, reject) => {
-    const i = n++;
-    waiting.set(i, { resolve, reject });
-    worker.postMessage({ id: i, witness });
-  });
-}
 
 /** Plain words for the prover's steps. */
 const STEPS: [RegExp, string][] = [
@@ -49,6 +35,8 @@ async function main() {
   const cfg = await config();
   const rpc = makeRpc(cfg.rpc);
   const stored = await load();
+  for (const a of accountList(stored, addressOf)) rememberSite(a.address, a.sites[0]);
+  if (req.from) rememberSite(req.from, req.origin);
   $("balance").textContent = `${shown(balance(stored.wallet), 4)} ETH`;
   sync(rpc, cfg, stored.wallet).then(async () => {
     await save({ wallet: stored.wallet });
@@ -56,7 +44,7 @@ async function main() {
   }).catch(() => undefined);
 
   if (req.kind === "connect") renderConnect(req, stored);
-  else renderSend(req, cfg);
+  else renderSend(req, cfg, stored);
 
   $("reject").onclick = async () => {
     await reply({ error: { code: 4001, message: "the user rejected the request" } });
@@ -68,12 +56,11 @@ async function main() {
     if (req.kind === "connect") {
       const use = (document.querySelector("input[name=use]:checked") as HTMLInputElement).value;
       const picked = (document.querySelector("input[name=existing]:checked") as HTMLInputElement | null)?.value;
-      const mode = ($("mode-private") as HTMLInputElement).checked ? "transaction" : "site";
-      await reply({ ok: true, use: use === "new" || !picked ? "new" : picked, mode });
+      await reply({ ok: true, use: use === "new" || !picked ? "new" : picked });
       window.close();
       return;
     }
-    await send(req, cfg, rpc);
+    go?.();
   };
 }
 
@@ -81,17 +68,6 @@ function renderConnect(req: any, stored: any) {
   $("title").textContent = "wants to connect";
   ($("approve") as HTMLButtonElement).textContent = "Connect";
   $("connect").hidden = false;
-  const modeBox = $("mode-private") as HTMLInputElement;
-  const modeText = () => {
-    $("mode-sub").textContent = modeBox.checked
-      ? "On: the site can't link your transactions."
-      : "Off: the site and anyone watching can link every transaction here.";
-    $("mode-sub").className = `sub ${modeBox.checked ? "" : "warn-text"}`;
-  };
-  modeBox.checked = req.mode !== "site";
-  modeBox.onchange = modeText;
-  modeText();
-
   const known = accountList(stored, addressOf).filter((a) => a.sites.length);
   const list = $("existing-list");
   const warn = () => {
@@ -113,7 +89,7 @@ function renderConnect(req: any, stored: any) {
     input.checked = i === 0;
     input.onchange = warn;
     const g = el("span", "grow");
-    g.append(el("div", "mono", short(a.address)), el("div", "small muted", `${a.sites.map(host).join(", ")} · ${a.txs} tx`));
+    g.append(el("div", "acct-name", nameOf(a.address)), el("div", "small muted", `${short(a.address)} · ${a.sites.map(host).join(", ")} · ${a.txs} tx`));
     label.append(input, accountAvatar(a.address, 28), g, el("span", "radio-mark"));
     list.append(label);
   });
@@ -126,55 +102,157 @@ function renderConnect(req: any, stored: any) {
   warn();
 }
 
-function renderSend(req: any, cfg: any) {
+function renderSend(req: any, cfg: any, stored: any) {
   $("title").textContent = req.calls.length > 1 ? `wants you to send ${req.calls.length} calls` : "wants you to send a transaction";
   $("send").hidden = false;
-  const priv = req.accountMode === "transaction";
+  // Warn when this account already sent a transaction (this one can then be linked to those),
+  // and offer a new account instead, so the user decides knowing that.
+  const use = pastUse(stored, req.from);
   const badge = $("privacy");
-  badge.hidden = false;
-  badge.className = `state ${priv ? "private" : "public"}`;
-  const g = el("div", "grow");
-  g.append(el("b", "", priv ? "Private" : "Linkable"),
-    el("span", "", priv
-      ? "This site gets a new account after this transaction."
-      : "This site keeps this account, so it can link all your transactions here."));
-  badge.replaceChildren(html(icon(priv ? "shield" : "alert", 22)), g);
-  // e2e and screen readers read the banner as one line.
-  badge.setAttribute("aria-label", `${priv ? "Private" : "Linkable"}: ${g.lastChild!.textContent}`);
+  badge.hidden = !use.txs;
+  if (use.txs) {
+    const n = use.txs;
+    badge.className = "state public warn-box";
+    const g = el("div", "grow");
+    g.append(el("b", "", "Account used before"),
+      el("span", "", `${n} earlier transaction${n === 1 ? "" : "s"} on ${use.sites.map(host).join(", ")}. Anyone can link this one to ${n === 1 ? "it" : "them"}.`));
+    const fix = html(`<button class="btn block" id="use-new">${icon("sparkles", 16)}<span>Use a new account instead</span></button>`) as HTMLButtonElement;
+    fix.onclick = async () => {
+      fix.disabled = true;
+      req.from = await switchAccount(req.origin, newAccountKey(), addressOf);
+      badge.hidden = true;
+      $("from").replaceChildren();
+      showFrom(req, cfg);
+      $("switched").hidden = false;
+      build(req, cfg, makeRpc(cfg.rpc));
+    };
+    const top = el("div", "warn-top");
+    top.append(html(icon("alert", 22)), g);
+    badge.replaceChildren(top, fix);
+    // e2e and screen readers read the banner as one line.
+    badge.setAttribute("aria-label", `Account used before: ${g.lastChild!.textContent}`);
+  }
+  showFrom(req, cfg);
+  build(req, cfg, makeRpc(cfg.rpc));
+}
 
+/** The From row, the nonce, and the planned frames, for the account the request sends from. */
+function showFrom(req: any, cfg: any) {
+  rememberSite(req.from, req.origin);
   const from = $("from");
   from.title = req.from;
-  from.append(accountAvatar(req.from, 20), el("span", "mono", short(req.from)));
+  // The name over its address (0x1234…4321, tap to copy), so neither has to wrap.
+  const who = el("span", "from-block");
+  who.append(el("span", "acct-name", nameOf(req.from)), hexChip(req.from));
+  from.append(accountAvatar(req.from, 28), who);
   $("net").textContent = `Local test chain (${cfg.chainId})`;
-  $("calls-title").textContent = req.calls.length > 1 ? `${req.calls.length} interactions` : "Interaction";
-  const list = $("calls");
-  for (const c of req.calls) {
-    const li = el("li", "card call");
-    const to = el("div", "kv");
-    const t = el("span", "acct-row");
-    t.append(html(`<span class="muted">${icon("code", 16)}</span>`), el("span", "mono", short(c.to)));
-    t.title = c.to;
-    to.append(el("span", "muted", "Contract"), t);
-    li.append(to);
-    if (c.value && BigInt(c.value) > 0n) {
-      const v = el("div", "kv");
-      v.append(el("span", "muted", "Amount"), el("span", "", `${shown(BigInt(c.value))} ETH`));
-      li.append(v);
+  showShape(req);
+  // nonce_keys [0], which this chain's EIP-8250 client reads as the account's own nonce.
+  makeRpc(cfg.rpc)("eth_getTransactionCount", [req.from, "latest"])
+    .then((n: string) => ($("nonce").textContent = `${BigInt(n)} (key 0)`))
+    .catch(() => ($("nonce").textContent = "key 0"));
+  // The frames this transaction will have, with each call's data decoded. The proof, the
+  // signature and the settle data are being made, so those frames spin until built.
+  const deadline = req.expiry ? "0x" + BigInt(req.expiry).toString(16).padStart(16, "0") : undefined;
+  const atomic = !!req.atomic && req.calls.length > 1;
+  const plan = [
+    ...(deadline ? [{ mode: 1, to: EXPIRY, flags: 0, data: deadline }] : []),
+    { mode: 1, to: null },
+    ...(cfg.shape === "preverify" ? [{ mode: 0, to: cfg.pool }] : []),
+    { mode: 1, to: cfg.pool },
+    ...req.calls.map((c: any, i: number) => ({ mode: 2, to: c.to, data: c.data ?? "0x", flags: atomic && i < req.calls.length - 1 ? 4 : 0 })),
+    { mode: 0, to: cfg.pool },
+  ];
+  $("calls-title").textContent = `${plan.length} frames`;
+  $("calls").replaceWith(Object.assign(frameMap(plan, null, { sender: req.from, pool: cfg.pool }), { id: "calls" }));
+}
+
+/** The Expires row, counting down (Send turns off once it passes), and the All or nothing row. */
+let expiryTimer: ReturnType<typeof setInterval> | undefined;
+function showShape(req: any) {
+  $("atomic-row").hidden = !(req.atomic && req.calls.length > 1);
+  $("expiry-row").hidden = !req.expiry;
+  clearInterval(expiryTimer);
+  if (!req.expiry) return;
+  const tick = () => {
+    const late = Math.floor(Date.now() / 1000) >= req.expiry;
+    $("expiry").textContent = untilText(req.expiry);
+    $("expiry").classList.toggle("late", late);
+    if (late && !$("send").hidden) {
+      clearInterval(expiryTimer);
+      drop?.();
+      go = drop = undefined;
+      const approve = $("approve") as HTMLButtonElement;
+      approve.disabled = true;
+      approve.textContent = "Expired";
+      $("build-status").textContent = "This request expired before it was sent. The site can ask again.";
     }
-    const bytes = (c.data.length - 2) / 2;
-    const d = el("details");
-    d.append(el("summary", "", bytes ? `Show data (${bytes} bytes)` : "No data"), el("code", "", c.data));
-    li.append(d);
-    list.append(li);
+  };
+  tick();
+  expiryTimer = setInterval(tick, 1000);
+}
+
+/** Each build; a newer one (after switching account) makes an older one's result void. */
+let generation = 0;
+/** Sends the built transaction (set once it is built), or undefined while building. */
+let go: (() => void) | undefined;
+/** Drops a built but unsent transaction. */
+let drop: (() => void) | undefined;
+
+/**
+ * Shows which frames are being worked on now, by the build's real step:
+ * the site's calls are known from the start; the private proof goes in the payer frame;
+ * then the proof and signature are in and the node dry-runs every frame.
+ */
+function building(phase: "start" | "proof" | "check") {
+  for (const c of document.querySelectorAll<HTMLElement>("#calls .fm-card")) {
+    const who = c.querySelector(".fm-who")?.textContent ?? "";
+    // Calls and the expiry frame are known up front; the rest wait for the proof or signature.
+    const call = c.classList.contains("SENDER") || !!c.querySelector(".fm-mode.EXPIRY");
+    const tick = c.querySelector<HTMLElement>(".fm-tick")!;
+    const busy = phase === "check" || (phase === "proof" && who === "payer");
+    c.classList.toggle("pending", !call && !busy);
+    tick.className = `fm-tick ${busy ? "spin" : call ? "" : "wait"}`;
+    tick.textContent = "";
   }
 }
 
-async function send(req: any, cfg: any, rpc: any) {
-  $("send").hidden = true;
-  $("progress").hidden = false;
-  $("foot").hidden = true;
-  const status = $("status");
-  try {
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Once built: the frames come ready one by one, in order, each ticked by its dry-run result. */
+async function readyInOrder(box: HTMLElement, mine: number): Promise<boolean> {
+  const cards = [...box.querySelectorAll<HTMLElement>(".fm-card")];
+  const ticks = cards.map((c) => {
+    const t = c.querySelector<HTMLElement>(".fm-tick")!;
+    const end = [t.className, t.textContent ?? ""] as const;
+    c.classList.add("pending");
+    t.className = "fm-tick wait";
+    t.textContent = "";
+    return { t, end };
+  });
+  for (let i = 0; i < cards.length; i++) {
+    cards[i].classList.remove("pending");
+    ticks[i].t.className = "fm-tick spin";
+    await sleep(260);
+    if (mine !== generation) return false;
+    ticks[i].t.className = ticks[i].end[0].includes("ok") || ticks[i].end[0].includes("bad") ? ticks[i].end[0] : "fm-tick ok";
+    ticks[i].t.textContent = ticks[i].end[1] || "✓";
+  }
+  return true;
+}
+
+/** Builds (proves, signs, dry-runs) the transaction for req.from, then waits for Send or Cancel. */
+function build(req: any, cfg: any, rpc: any) {
+  const mine = ++generation;
+  drop?.();
+  go = drop = undefined;
+  const approve = $("approve") as HTMLButtonElement;
+  approve.disabled = true;
+  approve.textContent = "Building…";
+  $("build-status").textContent = "Making the private proof…";
+  $("build-status").className = "muted small build-status";
+  building("start");
+  (async () => {
     const now = await load();
     // The key of the account this request names: the site's current one, or one it used before.
     const current = now.accounts[req.origin];
@@ -182,30 +260,84 @@ async function send(req: any, cfg: any, rpc: any) {
       ? current
       : now.used[req.origin]?.find((u) => u.address === req.from)?.key;
     if (!key) throw new Error(`no key for ${req.from}`);
-    const sent = await sponsoredSend({
-      rpc, cfg, state: now.wallet, senderKey: key, calls: req.calls, prover: workerProver(),
-      step: (s) => (status.textContent = `${plainStep(s)}…`),
-    });
-    await save({ wallet: now.wallet });
+    return sponsoredSend({
+      rpc, cfg, state: now.wallet, senderKey: key, calls: req.calls, prover: workerProver(), atomic: req.atomic, expiry: req.expiry,
+      step: (st) => {
+        if (mine !== generation) return;
+        if (/send/i.test(st)) { $("status").textContent = "Sending…"; return; }
+        $("build-status").textContent = `${plainStep(st)}…`;
+        building(/check|simulat/i.test(st) ? "check" : "proof");
+      },
+      inspect: async (v: Inspection) => {
+        if (mine !== generation) return false;
+        // Built: the real frames, ticked by the dry run; tap one to inspect it.
+        const all = el("details", "card pad all-fields");
+        all.append(el("summary", "", "All fields"), txOverview(v.tx, null, { pool: cfg.pool, unsent: true }));
+        const map = frameMap(v.tx.frames, v.frames, { sender: v.tx.sender, pool: cfg.pool, tx: v.tx, unsent: true, summary: false });
+        const box = el("div", "built");
+        box.id = "calls";
+        box.append(map, all);
+        $("calls").replaceWith(box);
+        $("build-status").textContent = "Checking each frame…";
+        if (!(await readyInOrder(map, mine))) return false;
+        $("calls-title").textContent = `${v.tx.frames.length} frames · ready`;
+        $("build-status").textContent = "";
+        $("max-fee").textContent = `up to ${shown(v.fee, 6)} ETH`;
+        approve.textContent = "Send";
+        approve.disabled = false;
+        approve.focus();
+        return new Promise<boolean>((resolve) => {
+          go = () => {
+            go = drop = undefined;
+            $("send").hidden = true;
+            $("progress").hidden = false;
+            $("foot").hidden = true;
+            $("status").textContent = "Sending…";
+            resolve(true);
+          };
+          drop = () => resolve(false);
+        });
+      },
+    }).then((sent) => ({ sent, wallet: now.wallet }));
+  })().then(async ({ sent, wallet }) => {
+    await save({ wallet });
     $("progress-mark").className = "done-mark";
     $("progress-mark").innerHTML = icon("check", 34);
     $("progress-title").textContent = "Sent";
-    status.textContent = `Sent. Gas up to ${shown(sent.fee)} ETH, the unused part comes back.`;
-    await reply({ hash: sent.hash });
-    setTimeout(() => window.close(), 1500);
-  } catch (e) {
-    $("progress-mark").className = "fail-mark";
-    $("progress-mark").innerHTML = icon("x", 30);
-    $("progress-title").textContent = "Couldn't send";
+    $("status").textContent = `Gas up to ${shown(sent.fee)} ETH. The unused part comes back.`;
+    await reply({ hash: sent.hash, from: req.from });
+    // With an explorer, the window stays open to offer its link; without one it closes itself.
+    const link = explorerLink(cfg.explorer, sent.hash);
+    if (link) {
+      const close = el("button", "btn secondary", "Close") as HTMLButtonElement;
+      close.id = "close";
+      close.onclick = () => window.close();
+      const row = el("div", "done-actions");
+      row.append(link, close);
+      $("progress").append(row);
+    } else setTimeout(() => window.close(), 1500);
+  }).catch(async (e) => {
+    if (mine !== generation || (e as Error).name === "Cancelled") return;
     const msg = (e as Error).message;
-    status.textContent = /failed to fetch/i.test(msg)
+    const text = /failed to fetch/i.test(msg)
       ? cfg.via === "sidecar"
         ? `Can't reach the alt mempool at ${cfg.sidecar}. Start it with "bash privacy-pool/sidecar.sh start", or rebuild with --via privileged to send straight to the node.`
         : `Can't reach the node at ${cfg.rpc}. Is the local chain running?`
       : msg;
-    status.className = "error";
-    await reply({ error: { code: 5710, message: `the privacy paymaster could not pay: ${(e as Error).message}` } });
-  }
+    for (const t of document.querySelectorAll<HTMLElement>("#calls .fm-tick.spin")) { t.className = "fm-tick bad"; t.textContent = "✕"; }
+    if (!$("progress").hidden) {
+      $("progress-mark").className = "fail-mark";
+      $("progress-mark").innerHTML = icon("x", 30);
+      $("progress-title").textContent = "Couldn't send";
+      $("status").textContent = text;
+      $("status").className = "error";
+    } else {
+      $("build-status").textContent = text;
+      $("build-status").className = "error small build-status";
+      approve.textContent = "Can't send";
+    }
+    await reply({ error: { code: 5710, message: `the privacy paymaster could not pay: ${msg}` } });
+  });
 }
 
 main();

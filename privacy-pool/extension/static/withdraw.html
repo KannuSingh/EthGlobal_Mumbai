@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Send · Nainokot Wallet</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="approve">
+<header class="req-head">
+  <img class="logo-img" src="logo.svg" alt="" width="40" height="40">
+  <div class="grow"><div class="req-site">Send</div><div class="req-kind">To any address, or privately to another wallet</div></div>
+</header>
+
+<main class="req-body">
+  <section id="form" class="view">
+    <div class="card rows">
+      <label class="field-row"><span class="muted small">To</span>
+        <input id="to" class="input mono" placeholder="0x… or a private address, nk1…" autocomplete="off" spellcheck="false"></label>
+      <label class="field-row"><span class="muted small">Amount (ETH)</span>
+        <input id="amount" class="input" inputmode="decimal" placeholder="0.01" autocomplete="off"></label>
+      <div class="kv small"><span class="muted">Private funds</span><span id="balance">…</span></div>
+      <div class="kv small"><span class="muted">Most you can send now</span><button class="link" id="max">…</button></div>
+    </div>
+    <div class="state private">
+      <span id="shield-icon"></span>
+      <div class="grow"><b id="note-title">Sent by the privacy pool</b><span id="note-text"></span></div>
+    </div>
+    <p class="error small" id="form-error" hidden></p>
+  </section>
+
+  <!-- After proving: inspect, then submit or cancel -->
+  <section id="review" class="review" hidden></section>
+
+  <section id="progress" class="progress" hidden>
+    <div id="progress-mark" class="spinner"></div>
+    <h2 id="progress-title">Sending</h2>
+    <p class="muted" id="status" role="status">Starting…</p>
+  </section>
+</main>
+
+<div class="by"><img src="logo.svg" alt="">Nainokot Wallet</div>
+<footer class="req-foot" id="foot">
+  <button class="btn secondary" id="cancel">Cancel</button>
+  <button class="btn primary" id="go">Send</button>
+</footer>
+<script type="module" src="withdraw.js"></script>
+</body>
+</html>

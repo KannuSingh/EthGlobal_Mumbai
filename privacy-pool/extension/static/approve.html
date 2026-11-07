@@ -30,43 +30,42 @@
     <div class="acct-list" id="existing-list" hidden></div>
     <p class="warn-text" id="existing-warning" hidden></p>
 
-    <div class="section-title">On this site</div>
-    <div class="card rows">
-      <div>
-        <div class="grow"><b>New account after each transaction</b><span class="sub" id="mode-sub"></span></div>
-        <label class="switch"><input type="checkbox" id="mode-private" aria-label="New account after each transaction"><span></span></label>
-      </div>
-    </div>
     <p class="muted small" style="margin:0 2px">The account holds no ETH. Gas is paid from your private funds.</p>
   </section>
 
   <!-- Send -->
   <section id="send" class="view" hidden>
     <div class="state" id="privacy" hidden></div>
+    <div class="state private" id="switched" hidden><span class="grow"><b>New account</b><span>The site sees it from now on.</span></span></div>
     <div class="card rows">
       <div class="kv"><span class="muted">From</span><span class="acct-row" id="from"></span></div>
       <div class="kv"><span class="muted">Network</span><span id="net"></span></div>
+      <div class="kv"><span class="muted">Nonce</span><span id="nonce">key 0</span></div>
+      <div class="kv" id="expiry-row" hidden><span class="muted">Expires</span><span class="expiry-line" id="expiry"></span></div>
+      <div class="kv" id="atomic-row" hidden><span class="muted">Calls</span><span>All or nothing</span></div>
     </div>
     <div class="section-title" id="calls-title">Interaction</div>
-    <ol class="calls" id="calls"></ol>
+    <ol class="fx" id="calls"></ol>
+    <p class="muted small build-status" id="build-status" role="status"></p>
     <div class="card rows">
-      <div class="kv"><span class="muted">Network fee</span><span><b style="display:inline">Paid privately</b></span></div>
+      <div class="kv"><span class="muted">Network fee</span><span><b style="display:inline">Paid privately</b> <span class="muted small" id="max-fee"></span></span></div>
       <div class="kv small"><span class="muted">From private funds</span><span id="balance"></span></div>
     </div>
   </section>
 
-  <!-- Proving and sending -->
+  <!-- Sending -->
+
   <section id="progress" class="progress" hidden>
     <div id="progress-mark" class="spinner"></div>
     <h2 id="progress-title">Sending privately</h2>
-    <p class="muted" id="status" role="status">Starting…</p>
+    <p class="muted" id="status">Sending…</p>
   </section>
 </main>
 
 <div class="by"><img src="logo.svg" alt="">Nainokot Wallet</div>
 <footer class="req-foot" id="foot">
   <button class="btn secondary" id="reject">Cancel</button>
-  <button class="btn primary" id="approve">Confirm</button>
+  <button class="btn primary" id="approve">Send</button>
 </footer>
 <script type="module" src="approve.js"></script>
 </body>

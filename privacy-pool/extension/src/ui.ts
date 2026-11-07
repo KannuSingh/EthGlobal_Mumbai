@@ -1,4 +1,6 @@
-/** Shared bits for the popup and approval windows: icons, avatars, formatting. */
+/** Shared bits for the popup and approval windows: icons, avatars, names, formatting. */
+import { avatarStyle, nameOf, rememberSite } from "./names.js";
+export { nameOf, rememberSite };
 
 const paths: Record<string, string> = {
   settings: '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>',
@@ -11,6 +13,7 @@ const paths: Record<string, string> = {
   link: '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
   sparkles: '<path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/>',
   send: '<path d="M7 7h10v10"/><path d="M7 17 17 7"/>',
+  receive: '<path d="M17 7 7 17"/><path d="M17 17H7V7"/>',
   check: '<path d="M20 6 9 17l-5-5"/>',
   home: '<path d="M15 21v-8a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v8"/><path d="M3 10a2 2 0 0 1 .709-1.528l7-5.999a2 2 0 0 1 2.582 0l7 5.999A2 2 0 0 1 21 10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
   users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
@@ -21,6 +24,7 @@ const paths: Record<string, string> = {
   code: '<path d="m16 18 6-6-6-6"/><path d="m8 6-6 6 6 6"/>',
   globe: '<circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/>',
   x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+  external: '<path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
 };
 
 export function icon(name: string, size = 18): string {
@@ -56,10 +60,8 @@ function hash(text: string): number {
 
 /** A round picture made from an address: two colours from its bytes. */
 export function accountAvatar(address: string, size = 36): HTMLElement {
-  const h = hash(address.toLowerCase());
-  const a = h % 360, b = (a + 40 + ((h >> 9) % 120)) % 360, angle = (h >> 17) % 360;
   const e = el("span", "avatar");
-  e.style.cssText = `width:${size}px;height:${size}px;background:linear-gradient(${angle}deg,hsl(${a} 75% 58%),hsl(${b} 70% 45%))`;
+  e.style.cssText = `width:${size}px;height:${size}px;background:${avatarStyle(address)}`;
   return e;
 }
 
@@ -69,6 +71,14 @@ export function siteAvatar(origin: string, size = 36): HTMLElement {
   const e = el("span", "site-avatar", (name.replace(/^www\./, "")[0] ?? "?").toUpperCase());
   e.style.cssText = `width:${size}px;height:${size}px;font-size:${Math.round(size * 0.42)}px;background:hsl(${hash(name) % 360} 55% 92%);color:hsl(${hash(name) % 360} 60% 30%)`;
   return e;
+}
+
+/** A name over its short address, e.g. "Misty Deer" / "0x671f…e3f9". */
+export function nameBlock(address: string, cls = ""): HTMLElement {
+  const box = el("div", `name-block ${cls}`.trim());
+  box.title = address;
+  box.append(el("div", "acct-name", nameOf(address)), el("div", "mono small muted", short(address)));
+  return box;
 }
 
 /** "3 min ago" style time. */
@@ -91,4 +101,18 @@ export function copyButton(text: string, onCopied?: () => void): HTMLElement {
     onCopied?.();
   };
   return b;
+}
+
+/** A transaction's page on the chain's block explorer, or null when the chain has none (the local chain). */
+export function explorerLink(explorer: string | undefined, hash: string, label = "View on explorer"): HTMLAnchorElement | null {
+  if (!explorer || !/^https?:\/\//.test(explorer) || !/^0x[0-9a-fA-F]{64}$/.test(hash)) return null;
+  const a = document.createElement("a");
+  a.className = "explorer-link";
+  a.href = `${explorer}/tx/${hash}`;
+  a.target = "_blank";
+  a.rel = "noopener noreferrer";
+  a.innerHTML = `<span></span>${icon("external", 14)}`;
+  a.querySelector("span")!.textContent = label;
+  a.onclick = (e) => e.stopPropagation();
+  return a;
 }

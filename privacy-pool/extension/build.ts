@@ -2,10 +2,12 @@
  * Builds the extension into privacy-pool/extension/out/, which Chrome loads unpacked
  * (chrome://extensions, Developer mode, Load unpacked). Run after privacy-pool/deploy.sh:
  *
- *   node privacy-pool/extension/build.ts [--via privileged|sidecar] [--shape last|preverify]
+ *   node privacy-pool/extension/build.ts [--via privileged|raw|sidecar] [--shape last|preverify] [--rpc URL] [--sidecar URL] [--explorer URL]
+ * --explorer (or EXPLORER_URL): a block explorer whose /tx/<hash> page the wallet links to; the local chain has none.
  *
- * config.json in out/ names the local chain, the pool, the sidecar and the local dev chain's
- * funder key (public, worth nothing), which pays for "Add 0.1 ETH" and for publishing roots.
+ * config.json in out/ names the chain, the pool, the sidecar and the funder key, which pays for
+ * "Add 0.1 ETH" and for publishing roots. POOL_DIR (default altlocal.nosync/privacy-pool) and
+ * FUNDER_KEY_FILE (default altlocal.nosync/funder.key) pick another deployment.
  * esbuild comes from the root node_modules (npm ci at the root first).
  */
 import { copyFileSync, cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -22,8 +24,8 @@ const arg = (name: string, fallback: string) => {
   return i > 0 ? process.argv[i + 1] : fallback;
 };
 
-const deploy = JSON.parse(readFileSync(join(root, "altlocal.nosync/privacy-pool/deploy.json"), "utf8"));
-const funderKey = readFileSync(join(root, "altlocal.nosync/funder.key"), "utf8").split("\n")[0].trim();
+const deploy = JSON.parse(readFileSync(join(resolve(root, process.env.POOL_DIR ?? "altlocal.nosync/privacy-pool"), "deploy.json"), "utf8"));
+const funderKey = readFileSync(resolve(root, process.env.FUNDER_KEY_FILE ?? "altlocal.nosync/funder.key"), "utf8").split("\n")[0].trim();
 const config = {
   chainId: String(BigInt(process.env.CHAIN_ID ?? "1337")),
   rpc: arg("--rpc", deploy.rpc),
@@ -32,8 +34,9 @@ const config = {
   shape: arg("--shape", "last"),
   pool: deploy.pool,
   funderKey,
+  explorer: arg("--explorer", process.env.EXPLORER_URL ?? "").replace(/\/+$/, ""),
 };
-if (!["sidecar", "privileged"].includes(config.via)) throw new Error("--via is sidecar or privileged");
+if (!["sidecar", "raw", "privileged"].includes(config.via)) throw new Error("--via is sidecar, raw or privileged");
 if (!["last", "preverify"].includes(config.shape)) throw new Error("--shape is last or preverify");
 
 const shims = {
@@ -53,7 +56,7 @@ const common = { bundle: true, target: "chrome120", logLevel: "warning", plugins
 await esbuild.build({
   ...common, format: "esm", outdir: out,
   entryPoints: { background: join(here, "src/background.ts"), approve: join(here, "src/approve.ts"),
-    popup: join(here, "src/popup.ts"), "prover-worker": join(here, "src/prover-worker.ts") },
+    popup: join(here, "src/popup.ts"), withdraw: join(here, "src/withdraw.ts"), "prover-worker": join(here, "src/prover-worker.ts") },
 });
 await esbuild.build({
   ...common, format: "iife", outdir: out,

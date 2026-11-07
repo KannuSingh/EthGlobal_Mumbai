@@ -8,7 +8,7 @@
 <body class="popup">
 <header class="topbar">
   <div class="brand"><img class="logo-img" src="logo.svg" alt="">Nainokot</div>
-  <span class="chip" id="network-chip"><i class="dot"></i><span id="network-name">Local</span></span>
+  <button class="chip site-chip" id="site-chip" hidden></button>
 </header>
 
 <div class="scroll">
@@ -18,21 +18,22 @@
       <div class="hero-label" id="hero-label">Private funds</div>
       <div class="hero-amount"><span id="balance">…</span><span class="unit">ETH</span></div>
       <div class="hero-sub" id="notes">Pays the gas for all your accounts. Nobody can tell whose it is.</div>
-      <div class="hero-actions"><button class="hero-btn" id="add"></button></div>
+      <div class="hero-actions"><button class="hero-btn" id="add"></button><button class="hero-btn" id="withdraw"></button><button class="hero-btn" id="receive"></button></div>
     </div>
-    <div class="state" id="privacy-state"></div>
-    <div class="section-title">Connected sites</div>
-    <div class="card"><ul class="list" id="sites"></ul></div>
+    <div class="card pad receive" id="receive-card" hidden>
+      <div class="receive-head"><b>Your private address</b><span id="receive-copy"></span></div>
+      <code class="receive-addr" id="private-address">…</code>
+      <p class="muted small">Another Nainokot wallet pays it privately: the money stays in the pool, and only you can see it arrive. For ETH from an ordinary account, use Add instead.</p>
+    </div>
   </section>
 
   <!-- Accounts -->
   <section class="view" id="accounts" hidden>
     <div class="segmented" role="tablist">
-      <button id="seg-private" class="active" data-kind="private">Private <span class="count" id="count-private">0</span></button>
-      <button id="seg-public" data-kind="public">Public <span class="count" id="count-public">0</span></button>
+      <button id="seg-all" class="active" data-group="all">All <span class="count" id="count-all">0</span></button>
+      <button id="seg-app" data-group="app">By app <span class="count" id="count-apps">0</span></button>
     </div>
-    <p class="muted small" id="accounts-help" style="margin:-4px 2px"></p>
-    <div class="card"><ul class="list" id="account-list"></ul></div>
+    <div id="account-groups"></div>
   </section>
 
   <!-- History -->
@@ -49,11 +50,8 @@
         <label class="switch"><input type="checkbox" id="default-private" aria-label="New account for every transaction"><span></span></label>
       </div>
     </div>
-    <div class="section-title">Private funds</div>
-    <div class="card rows">
-      <div class="kv"><span class="muted">Balance</span><span id="settings-balance"></span></div>
-      <div class="kv"><span class="muted">Held in</span><span id="settings-notes"></span></div>
-    </div>
+    <div class="section-title">Connected sites</div>
+    <div class="card"><ul class="list" id="sites"></ul></div>
     <div class="section-title">Network</div>
     <div class="card rows">
       <div class="kv"><span class="muted">Chain</span><span id="settings-chain"></span></div>
@@ -62,6 +60,9 @@
     </div>
     <button class="btn danger block" id="disconnect-all">Disconnect all sites</button>
   </section>
+
+  <!-- One transaction -->
+  <section class="view" id="tx" hidden></section>
 
   <!-- One site -->
   <section class="view" id="site" hidden></section>

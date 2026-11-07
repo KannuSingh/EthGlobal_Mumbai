@@ -78,14 +78,21 @@ async function afterSend(origin: string, from: string, hash: string, method: str
 }
 
 /** EIP-5792 calls, checked; the capability rules are the privacyPaymaster draft's. */
-function checkBatch(p: any, chainHex: string, from: string): { calls: any[] } | { error: any } {
+function checkBatch(p: any, chainHex: string, from: string): { calls: any[]; atomic: boolean; expiry?: number } | { error: any } {
   if (!p || !Array.isArray(p.calls) || p.calls.length === 0) return err(INVALID_PARAMS, "calls must be a non-empty list");
   if (p.chainId && p.chainId.toLowerCase() !== chainHex) return err(UNSUPPORTED_CHAIN, `this wallet is on chain ${chainHex}`);
   if (p.from && p.from.toLowerCase() !== from.toLowerCase()) return err(UNAUTHORIZED, "from is not this site's account");
   const caps = p.capabilities ?? {};
+  let expiry: number | undefined;
   for (const [name, cap] of Object.entries<any>(caps)) {
     if (name === "privacyPaymaster") {
       if (typeof cap?.optional !== "boolean") return err(INVALID_PARAMS, "privacyPaymaster needs optional: true or false");
+    } else if (name === "expiry") {
+      // { validUntil: unix seconds (number or hex) }: an EIP-8141 expiry frame goes first.
+      const v = typeof cap?.validUntil === "string" ? Number(BigInt(cap.validUntil)) : cap?.validUntil;
+      if (!Number.isSafeInteger(v) || v <= 0) return err(INVALID_PARAMS, "expiry needs validUntil, in unix seconds");
+      if (v <= Math.floor(Date.now() / 1000)) return err(INVALID_PARAMS, "expiry.validUntil is already past");
+      expiry = v;
     } else if (!cap?.optional) return err(UNSUPPORTED_CAPABILITY, `unsupported capability ${name}`);
   }
   for (const c of p.calls) {
@@ -96,7 +103,8 @@ function checkBatch(p: any, chainHex: string, from: string): { calls: any[] } | 
     }
     if (typeof c.to !== "string") return err(INVALID_PARAMS, "every call needs a to address (no contract creation)");
   }
-  return { calls: p.calls.map((c: any) => ({ to: c.to, data: c.data ?? "0x", value: c.value ?? "0x0" })) };
+  // atomicRequired: the call frames form one EIP-8141 atomic batch, so all land or none.
+  return { calls: p.calls.map((c: any) => ({ to: c.to, data: c.data ?? "0x", value: c.value ?? "0x0" })), atomic: p.atomicRequired === true, expiry };
 }
 
 async function handle(origin: string, method: string, params: any): Promise<any> {
@@ -124,7 +132,8 @@ async function handle(origin: string, method: string, params: any): Promise<any>
       }
       now.accounts[origin] = key;
       now.addresses[origin] = addressOf(key);
-      now.siteMode[origin] = reply.mode === "site" ? "site" : "transaction";
+      // The connect window no longer asks; the site follows the default unless changed in the popup.
+      if (reply.mode === "site" || reply.mode === "transaction") now.siteMode[origin] = reply.mode;
       now.connected[origin] = true;
       await save({ accounts: now.accounts, addresses: now.addresses, siteMode: now.siteMode, connected: now.connected });
       return { result: [now.addresses[origin]] };
@@ -135,7 +144,7 @@ async function handle(origin: string, method: string, params: any): Promise<any>
     }
     case "wallet_getCapabilities": {
       // Only whether a privacy paymaster is configured, per the draft: nothing about balances.
-      return { result: { [chainHex]: { privacyPaymaster: { supported: true }, atomic: { status: "unsupported" } } } };
+      return { result: { [chainHex]: { privacyPaymaster: { supported: true }, atomic: { status: "supported" }, expiry: { supported: true } } } };
     }
     case "eth_sendTransaction":
     case "wallet_sendCalls": {
@@ -147,13 +156,16 @@ async function handle(origin: string, method: string, params: any): Promise<any>
         checked = checkBatch({ calls: [{ to: t.to, data: t.data ?? t.input, value: t.value }], from: t.from }, chainHex, from);
       } else checked = checkBatch(params?.[0], chainHex, from);
       if (checked.error) return checked;
-      const reply = await openApproval("send", origin, { from, calls: checked.calls, method, accountMode: modeOf(s, origin) });
+      const reply = await openApproval("send", origin, {
+        from, calls: checked.calls, atomic: checked.atomic, expiry: checked.expiry, method, accountMode: modeOf(s, origin),
+      });
       if (reply.error) return reply;
-      await afterSend(origin, from, reply.hash, method, checked.calls.length);
+      // The window may have switched to a new account (after warning about a used one).
+      await afterSend(origin, reply.from ?? from, reply.hash, method, checked.calls.length);
       if (method === "eth_sendTransaction") return { result: reply.hash };
       const id = "0x" + [...crypto.getRandomValues(new Uint8Array(32))].map((b) => b.toString(16).padStart(2, "0")).join("");
       const now = await load();
-      now.batches[id] = { hash: reply.hash, origin, chainId: chainHex };
+      now.batches[id] = { hash: reply.hash, origin, chainId: chainHex, atomic: checked.atomic };
       await save({ batches: now.batches });
       return { result: { id } };
     }
@@ -164,7 +176,7 @@ async function handle(origin: string, method: string, params: any): Promise<any>
       const status = !rec ? 100 : rec.status === "0x1" ? 200 : 500;
       return {
         result: {
-          version: "2.0.0", id: params[0], chainId: b.chainId, atomic: false, status,
+          version: "2.0.0", id: params[0], chainId: b.chainId, atomic: !!b.atomic, status,
           receipts: rec
             ? [{ logs: rec.logs, status: rec.status, blockHash: rec.blockHash, blockNumber: rec.blockNumber,
                  gasUsed: rec.gasUsed, transactionHash: rec.transactionHash }]
