@@ -1,0 +1,14 @@
+diff --git a/src/gas.ts b/src/gas.ts
+index 9e61048..0a03aa1 100644
+--- a/src/gas.ts
++++ b/src/gas.ts
+@@ -52,7 +52,8 @@ export const VERIFY_FRAME_GAS = 225_000n;
+ // reproduced fix, not a proof of every settlement shape. State stays a
+ // separate declared dimension.
+ export const SETTLE_FRAME_GAS = 2_000_000n;
+-export const SETTLE_FRAME_STATE_GAS = 550_000n;
++// Nainokot: msp's 550,000 plus the two nullifierSpent slots the privacy pool's settle marks.
++export const SETTLE_FRAME_STATE_GAS = 750_000n;
+ // Wallet/tooling default for the normal withdraw tail:
+ // DEFAULT(pool, claimWithdrawal(recipient)). These used to be dispatcher
+ // pins. The fourth frame is optional on every spend; omitting it on a

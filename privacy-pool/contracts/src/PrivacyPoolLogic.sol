@@ -4,8 +4,8 @@ pragma solidity ^0.8.24;
 /// @title PrivacyPoolLogic (Nainokot privacy pool, chain 1337 experiment)
 /// @notice msp d0b2131's ShieldedPoolLogic for a separate privacy pool whose notes pay the gas of
 /// any transaction the user's own account sends. Changes from msp: settle (pool as sender, with
-/// nullifiers as EIP-8250 nonce keys) is replaced by settleSponsored (the last frame of a
-/// sponsored transaction, nullifiers kept in storage), plus stake(). The state lives in
+/// nullifiers as EIP-8250 nonce keys) stays, and also marks nullifierSpent; settleSponsored (the
+/// last frame of a sponsored transaction, nullifiers kept in storage) and stake() are added. The state lives in
 /// PrivacyPoolDispatcher.yul's storage, which delegatecalls everything but its frame entries.
 /// @dev The dispatcher checks a spend's proof and whole frame transaction before approving
 /// it, and approval consumes the spend's nullifiers. A settlement that then fails burns the
@@ -280,6 +280,59 @@ contract PrivacyPoolLogic {
             emit WithdrawalCredited(s.recipient, s.publicAmount);
         }
         emit Notes(msg.data[SETTLE_SPEND_BYTES:SETTLE_SPEND_BYTES + notesLength]);
+    }
+
+    /// @notice Settles a pool-as-sender spend (msp's shape): only the pool itself can call it, as
+    /// the SENDER frame of a frame transaction whose VERIFY frame the dispatcher's pool-as-sender
+    /// entry approved. As msp's settle, plus the nullifiers marked in nullifierSpent, which both
+    /// shapes check before approval, so a note spent one way can never be spent the other.
+    function settle(Spend calldata s) external onlyDelegate {
+        if (msg.sender != address(this)) revert NotPoolSender();
+        uint256 notesLength = msg.data.length - SETTLE_SPEND_BYTES;
+        if (notesLength != 2 * NOTE_BYTES && notesLength != KEM_CIPHERTEXT_BYTES + 2 * NOTE_BYTES) {
+            revert InvalidNotes();
+        }
+        if (s.nf1 == bytes32(0) || s.nf2 == bytes32(0)) revert ZeroNullifier();
+        if (s.authorizer == address(0)) revert InvalidAuthorizer();
+        if (s.domain != domain(s.epoch)) revert InvalidDomain();
+        if (s.epoch > currentEpoch) revert InvalidEpoch();
+        if (
+            uint256(s.root) >= P || uint256(s.domain) >= P || uint256(s.nf1) >= P || uint256(s.nf2) >= P
+                || uint256(s.outCm1) >= P || uint256(s.outCm2) >= P
+        ) revert NotCanonical();
+        if (s.publicAmount >= MAX_VALUE || s.fee >= MAX_VALUE) revert ValueTooLarge();
+        if ((s.publicAmount == 0) != (s.recipient == address(0))) revert InvalidSettlementShape();
+        if (s.outCm1 == s.outCm2 || s.outCm1 == SINK_1 || s.outCm2 == SINK_0) {
+            revert InvalidSettlementShape();
+        }
+
+        nullifierSpent[s.nf1] = true;
+        nullifierSpent[s.nf2] = true;
+        emit NoteSpent(s.nf1);
+        emit NoteSpent(s.nf2);
+
+        uint32 appendCount;
+        if (s.outCm1 != SINK_0) appendCount++;
+        if (s.outCm2 != SINK_1) appendCount++;
+        _ensureCapacity(appendCount);
+
+        bool new1 = s.outCm1 != SINK_0;
+        bool new2 = s.outCm2 != SINK_1;
+        uint32 i1;
+        uint32 i2;
+        if (new1) i1 = _insert(s.outCm1);
+        if (new2) i2 = _insert(s.outCm2);
+        if (new1 || new2) {
+            currentRoot = _computeRoot();
+            if (new1) emit LeafAppended(s.outCm1, currentEpoch, i1, currentRoot);
+            if (new2) emit LeafAppended(s.outCm2, currentEpoch, i2, currentRoot);
+        }
+
+        if (s.publicAmount != 0) {
+            withdrawalCredit[s.recipient] += s.publicAmount;
+            emit WithdrawalCredited(s.recipient, s.publicAmount);
+        }
+        emit Notes(msg.data[SETTLE_SPEND_BYTES:]);
     }
 
     /// @dev The refund note for a fee of fee, its value 0 when nothing is left over. Measured

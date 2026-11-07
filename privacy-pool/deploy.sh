@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # Deploys the privacy pool on the local alt mempool chain (scripts/altlocal.sh start) and stakes it:
 # msp's Groth16 verifier and Poseidon libraries, PrivacyPoolLogic, the PrivacyPoolDispatcher as the pool,
-# an ERC-8421 staking registry, and a guest book to call as "any dapp". Then writes
-# altlocal.nosync/privacy-pool/wallet.json for privacy-pool/client.ts.
+# an ERC-8421 staking registry, and Framecaster (short posts, threads, replies, likes) as "any dapp". Then writes
+# altlocal.nosync/privacy-pool/deploy.json, which build.ts, the smokes and the demo page read.
 #
 #   bash privacy-pool/deploy.sh            # STAKE_WEI (default 1 ETH) staked for one day
+#
+# RPC_URL, FUNDER_KEY_FILE, POOL_DIR and REGISTRY (an existing ERC-8421 staking registry, used
+# instead of deploying one) point it at another chain 1337.
 #
 # The funder is the local dev chain's public key (altlocal.nosync/funder.key), worth nothing.
 set -euo pipefail
@@ -18,8 +21,9 @@ GP=$HERE/privacy-pool/contracts
 STAKE_WEI=${STAKE_WEI:-1000000000000000000}
 [[ -f $KEYFILE ]] || { echo "no $KEYFILE; run bash scripts/altlocal.sh setup first" >&2; exit 1; }
 [[ $(cast chain-id --rpc-url "$RPC") == 1337 ]] || { echo "$RPC is not chain 1337; run bash scripts/altlocal.sh start" >&2; exit 1; }
-if [[ -f $OUT/wallet.json ]]; then
-  echo "$OUT/wallet.json exists and may hold the only openings of notes; move it away first" >&2
+# Once per chain: a pool already deployed on this chain would be left with notes nobody can find.
+if [[ -f $OUT/deploy.json ]] && [[ $(cast code "$(jq -r .pool "$OUT/deploy.json")" --rpc-url "$RPC") != 0x ]]; then
+  echo "the pool in $OUT/deploy.json is already on this chain; for a new one, start a new chain first" >&2
   exit 1
 fi
 KEY=$(head -1 "$KEYFILE")
@@ -63,18 +67,16 @@ POOL=$(cast send --private-key "$KEY" --create "${INIT}${ARGS#0x}" --json | jq -
   { echo "the pool at $POOL does not answer currentRoot with the empty root" >&2; exit 1; }
 echo "    logic $LOGIC, pool $POOL"
 
-echo "==> staking registry, guest book, and the pool's stake"
-REGISTRY=$(forge create --root "$GP" --private-key "$KEY" --broadcast src/NaiveStakingRegistry.sol:NaiveStakingRegistry | deployed)
-GUESTBOOK=$(forge create --root "$GP" --private-key "$KEY" --broadcast src/GuestBook.sol:GuestBook | deployed)
+echo "==> staking registry, Framecaster, and the pool's stake"
+REGISTRY=${REGISTRY:-$(forge create --root "$GP" --private-key "$KEY" --broadcast src/NaiveStakingRegistry.sol:NaiveStakingRegistry | deployed)}
+FRAMECASTER=$(forge create --root "$GP" --private-key "$KEY" --broadcast src/Framecaster.sol:Framecaster | deployed)
 cast send --private-key "$KEY" "$POOL" 'stake(address,uint32)' "$REGISTRY" 86400 --value "$STAKE_WEI" >/dev/null
 echo "    registry $REGISTRY: pool stake $(cast call "$REGISTRY" 'getDepositInfo(address)(uint256,uint32,uint64)' "$POOL" | tr '\n' ' ')"
-echo "    guest book $GUESTBOOK"
+echo "    Framecaster $FRAMECASTER"
 
 mkdir -p "$OUT"
-(umask 077 && jq -n --arg pool "$POOL" --arg key "$KEYFILE" \
-  '{chainId: "1337", pool: $pool, funderKeyFile: $key, notes: []}' >"$OUT/wallet.json")
 jq -n --arg pool "$POOL" --arg logic "$LOGIC" --arg verifier "$VERIFIER" --arg t3 "$T3" --arg t4 "$T4" \
-  --arg registry "$REGISTRY" --arg guestbook "$GUESTBOOK" --arg rpc "$RPC" \
+  --arg registry "$REGISTRY" --arg framecaster "$FRAMECASTER" --arg rpc "$RPC" \
   '{rpc: $rpc, pool: $pool, logic: $logic, verifier: $verifier, poseidonT3: $t3, poseidonT4: $t4,
-    stakingRegistry: $registry, guestBook: $guestbook}' >"$OUT/deploy.json"
-echo "==> wrote ${OUT#$HERE/}/deploy.json and wallet.json"
+    stakingRegistry: $registry, framecaster: $framecaster}' >"$OUT/deploy.json"
+echo "==> wrote ${OUT#$HERE/}/deploy.json"
