@@ -7,7 +7,7 @@
   "engines": { "node": ">=24.7" },
   "scripts": {
     "setup": "bash scripts/setup.sh",
-    "test:contracts": "NO_SIDECAR=1 bash privacy-pool/run.sh",
+    "test:contracts": "node privacy-pool/core-smoke.ts && node privacy-pool/pool-send-smoke.ts",
     "build:extension": "node privacy-pool/extension/build.ts",
     "demo": "node privacy-pool/extension/demo/serve.ts",
     "test:extension": "node privacy-pool/extension/e2e.ts"

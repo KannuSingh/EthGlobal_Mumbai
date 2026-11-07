@@ -19,11 +19,11 @@ no other way to pay gas, so a failure is an error whatever `optional` says.
     bash privacy-pool/deploy.sh
     bash privacy-pool/sidecar.sh start                     # optional: the alt mempool with the (pool, nullifier) rule
     node privacy-pool/extension/build.ts                   # or --via sidecar through the alt mempool (untested)
-    node privacy-pool/extension/demo/serve.ts              # the guest book on http://127.0.0.1:8142/
+    node privacy-pool/extension/demo/serve.ts              # Framecaster on http://127.0.0.1:8142/
 
 Then in Chrome: chrome://extensions, Developer mode on, Load unpacked, pick privacy-pool/extension/out.
 Open the extension's popup and press "Add 0.1 ETH", then open http://127.0.0.1:8142/, Connect,
-and Sign. After a new chain, rebuild and remove and load the extension again (its notes belong to
+and post. After a new chain, rebuild and remove and load the extension again (its notes belong to
 the old chain).
 
 `node privacy-pool/extension/e2e.ts` does all of that in Chromium with Playwright and checks the

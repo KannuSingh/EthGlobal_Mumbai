@@ -10,7 +10,7 @@
 #   bash scripts/altlocal.sh stop
 #   bash scripts/altlocal.sh status
 #
-# Then: bash privacy-pool/deploy.sh (or bash privacy-pool/run.sh, which starts its own chain).
+# Then: bash privacy-pool/deploy.sh.
 # Each start is a fresh chain, so deploy again after it (move altlocal.nosync/config.json away).
 # MAX_VERIFY_GAS=100000 bash scripts/altlocal.sh start reproduces the devnet's refusal.
 set -euo pipefail

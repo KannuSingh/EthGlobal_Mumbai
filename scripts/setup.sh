@@ -2,7 +2,7 @@
 # One-time setup from a fresh clone (macOS or Linux):
 #   1. checks the tools (Node 24.7+, git, jq, curl, Rust/cargo, Foundry's forge and cast)
 #   2. fetches minimal-shielded-pool (msp) at d0b2131 into deps.nosync/ and applies
-#      patches/msp-envelope.patch and patches/msp-verify-gas.patch, then npm ci there
+#      patches/msp-envelope.patch, msp-verify-gas.patch and msp-settle-state.patch, then npm ci there
 #   3. npm ci at the root (esbuild, Playwright for the end-to-end check)
 #   4. bash scripts/altlocal.sh setup: fetches and builds the alt mempool ethrex (5-10 min)
 #
@@ -52,6 +52,13 @@ else
   echo "$MSP has other changes; move it away (mv $MSP $MSP.old) and run this again" >&2
   exit 1
 fi
+# msp-settle-state.patch touches only src/gas.ts, independent of the other two.
+SS=$HERE/patches/msp-settle-state.patch
+if git -C "$MSP" apply --reverse --check "$SS" 2>/dev/null; then
+  echo "    msp-settle-state.patch is applied"
+else
+  git -C "$MSP" apply "$SS" && echo "    applied msp-settle-state.patch"
+fi
 (cd "$MSP" && npm ci --no-audit --no-fund >/dev/null)
 echo "    npm ci done in $MSP"
 
@@ -63,5 +70,5 @@ step "the alt mempool node (forshtat/ethrex eip8141-tracer)"
 bash scripts/altlocal.sh setup
 
 step "ready"
-echo "    bash privacy-pool/run.sh                       # contracts end to end on a new chain"
+echo "    bash scripts/altlocal.sh start && bash privacy-pool/deploy.sh && node privacy-pool/core-smoke.ts"
 echo "    see README.md for the extension"
